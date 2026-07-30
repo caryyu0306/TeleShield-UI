@@ -16,6 +16,11 @@ let package = Package(
         .executableTarget(
             name: "TeleShieldApp",
             path: "Sources/TeleShieldApp"
+        ),
+        .testTarget(
+            name: "TeleShieldAppTests",
+            dependencies: ["TeleShieldApp"],
+            path: "Tests/TeleShieldAppTests"
         )
     ]
 )

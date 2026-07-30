@@ -51,6 +51,16 @@ struct ContentView: View {
         .sheet(isPresented: $showLogin) {
             LoginSheet(client: client, temporaryAccountID: $temporaryLoginAccountID)
         }
+        .onChange(of: client.authenticatedAccountID) { accountID in
+            let targetAccountID = temporaryLoginAccountID ?? client.selectedAccountID
+            guard AuthenticationPresentation.shouldDismissLoginSheet(
+                event: "auth_succeeded",
+                accountID: accountID,
+                targetAccountID: targetAccountID
+            ) else { return }
+            temporaryLoginAccountID = nil
+            showLogin = false
+        }
     }
 
     private var sidebar: some View {
@@ -768,7 +778,7 @@ private struct ScanStepper: View {
 private struct AccountsView: View {
     @ObservedObject var client: CoreClient
     @Binding var showLogin: Bool
-    @State private var showRemoveConfirmation = false
+    @State private var removalAccountID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -786,7 +796,7 @@ private struct AccountsView: View {
                     }
                     .disabled(account.running || client.isBusy)
                     Button("移除", role: .destructive) {
-                        Task { await client.selectAccount(account.id); showRemoveConfirmation = true }
+                        removalAccountID = account.id
                     }
                     .disabled(account.running || client.isBusy)
                 }
@@ -796,12 +806,17 @@ private struct AccountsView: View {
             .listStyle(.inset)
         }
         .padding(28)
-        .confirmationDialog("移除目前帳號？", isPresented: $showRemoveConfirmation, titleVisibility: .visible) {
+        .confirmationDialog("移除帳號？", isPresented: Binding(get: { removalAccountID != nil }, set: { if !$0 { removalAccountID = nil } }), titleVisibility: .visible) {
             Button("確認移除全部本機資料", role: .destructive) {
-                if let accountID = client.selectedAccountID { Task { await client.removeAccount(accountID) } }
+                if let accountID = removalAccountID {
+                    Task { _ = await client.removeAccount(accountID) }
+                }
+                removalAccountID = nil
             }
-            Button("取消", role: .cancel) {}
-        } message: { Text("會刪除這個帳號的 Session、設定、名單、群組與封鎖記錄；其他帳號不受影響。") }
+            Button("取消", role: .cancel) { removalAccountID = nil }
+        } message: {
+            Text("會刪除所選帳號的 Session、設定、名單、群組與封鎖記錄；其他帳號不受影響。")
+        }
     }
 }
 
@@ -814,6 +829,7 @@ private struct LoginSheet: View {
     @State private var phone = ""
     @State private var code = ""
     @State private var password = ""
+    @State private var cleanupStarted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -823,7 +839,7 @@ private struct LoginSheet: View {
                     Text("目前帳號：\(client.selectedAccount?.label ?? "尚未選取")").foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("關閉") { closeLogin() }
+                Button("關閉") { dismiss() }
             }
             Divider()
             Text("API 憑證只會交給本機 sidecar；請勿把 Hash 或 2FA 密碼貼到聊天或記錄中。")
@@ -843,18 +859,41 @@ private struct LoginSheet: View {
             }
             HStack {
                 if client.authChallengeKind == "code" {
-                    Button("送出驗證碼") { Task { await client.submitAuthCode(code) } }
+                    Button("送出驗證碼") {
+                        Task {
+                            await client.submitAuthCode(code)
+                            code = ""
+                        }
+                    }
                         .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || client.isBusy)
                 } else if client.authChallengeKind == "password" {
-                    Button("送出 2FA 密碼") { Task { await client.submitAuthPassword(password) } }
+                    Button("送出 2FA 密碼") {
+                        Task {
+                            await client.submitAuthPassword(password)
+                            password = ""
+                        }
+                    }
                         .disabled(password.isEmpty || client.isBusy)
                 } else {
-                    Button("開始登入") { Task { await client.startAuthentication(apiID: apiID, apiHash: apiHash, phone: phone) } }
+                    Button("開始登入") {
+                        Task {
+                            let accountID = temporaryAccountID ?? client.selectedAccountID
+                            await client.startAuthentication(
+                                apiID: apiID,
+                                apiHash: apiHash,
+                                phone: phone,
+                                accountID: accountID
+                            )
+                            apiID = ""
+                            apiHash = ""
+                            phone = ""
+                        }
+                    }
                         .buttonStyle(.borderedProminent)
                         .disabled(apiID.isEmpty || apiHash.isEmpty || phone.isEmpty || client.isBusy || client.authInProgress)
                 }
                 if client.authFlowID != nil {
-                    Button("取消登入") { closeLogin() }
+                    Button("取消登入") { dismiss() }
                 }
                 Spacer()
                 if !client.authInProgress && client.selectedAccount?.configured == true {
@@ -865,19 +904,31 @@ private struct LoginSheet: View {
         }
         .padding(28)
         .frame(width: 520)
+        .onChange(of: client.authInProgress) { inProgress in
+            if !inProgress {
+                apiHash = ""
+                code = ""
+                password = ""
+            }
+        }
+        .onDisappear { cleanupAfterDismissal() }
     }
 
-    private func closeLogin() {
+    private func cleanupAfterDismissal() {
+        guard !cleanupStarted else { return }
+        cleanupStarted = true
         Task {
             if client.authFlowID != nil {
                 await client.cancelAuthentication()
             }
-            if let accountID = temporaryAccountID,
-               client.selectedAccount?.configured != true {
-                await client.removeAccount(accountID, deleteFiles: true)
+            guard let accountID = temporaryAccountID else { return }
+            if client.authenticatedAccountID == accountID {
+                temporaryAccountID = nil
+                return
+            }
+            if await client.removeAccount(accountID, deleteFiles: true) {
                 temporaryAccountID = nil
             }
-            dismiss()
         }
     }
 }
@@ -954,8 +1005,10 @@ struct MenuBarView: View {
                 Button("重新整理") { Task { await client.refresh() } }
             }
             Button("結束 TeleShield") {
-                client.shutdown()
-                NSApplication.shared.terminate(nil)
+                Task {
+                    await client.shutdownGracefully()
+                    NSApplication.shared.terminate(nil)
+                }
             }
         }
         .padding(12)

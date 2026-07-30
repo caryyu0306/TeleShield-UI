@@ -46,6 +46,16 @@ enum JSONValue: Codable, Equatable {
     }
 }
 
+enum AuthenticationPresentation {
+    static func shouldDismissLoginSheet(
+        event: String,
+        accountID: String?,
+        targetAccountID: String?
+    ) -> Bool {
+        event == "auth_succeeded" && accountID != nil && accountID == targetAccountID
+    }
+}
+
 struct AccountSummary: Codable, Identifiable {
     let accountID: String?
     let userID: Int64?

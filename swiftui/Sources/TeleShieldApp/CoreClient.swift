@@ -17,6 +17,7 @@ final class CoreClient: ObservableObject {
     @Published private(set) var authChallengeKind: String?
     @Published private(set) var authDeliveryMessage = ""
     @Published private(set) var authInProgress = false
+    @Published private(set) var authenticatedAccountID: String?
 
     @Published private(set) var whitelist: [ListEntry] = []
     @Published private(set) var blacklist: [ListEntry] = []
@@ -36,11 +37,14 @@ final class CoreClient: ObservableObject {
     private var nextRequestID = 1
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
     private var backgroundStartupHandled = false
+    private var scanStartInFlight = false
+    private var stdoutReadHandle: FileHandle?
+    private var stderrReadHandle: FileHandle?
 
     var selectedAccount: AccountSummary? { status?.selectedAccount }
     var selectedAccountID: String? { status?.activeAccountID ?? status?.selectedAccount.accountID }
     var helperIsRunning: Bool { process?.isRunning == true }
-    var hasActiveScan: Bool { scanJobID != nil }
+    var hasActiveScan: Bool { scanJobID != nil || scanStartInFlight }
     var canModifySelectedAccount: Bool {
         guard let selectedAccount else { return false }
         return !selectedAccount.running && !authInProgress && operationJobID == nil
@@ -68,12 +72,16 @@ final class CoreClient: ObservableObject {
         child.standardOutput = stdoutPipe
         child.standardError = stderrPipe
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        let stdoutReadHandle = stdoutPipe.fileHandleForReading
+        let stderrReadHandle = stderrPipe.fileHandleForReading
+        self.stdoutReadHandle = stdoutReadHandle
+        self.stderrReadHandle = stderrReadHandle
+        stdoutReadHandle.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
             Task { @MainActor [weak self] in self?.consume(data) }
         }
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        stderrReadHandle.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
             let message = String(data: data, encoding: .utf8) ?? "sidecar stderr"
@@ -152,13 +160,21 @@ final class CoreClient: ObservableObject {
         }
     }
 
-    func removeAccount(_ accountID: String, deleteFiles: Bool = true) async {
-        await runBusy("移除帳號") {
-            _ = try await self.request(
+    func removeAccount(_ accountID: String, deleteFiles: Bool = true) async -> Bool {
+        guard !isBusy else { return false }
+        isBusy = true
+        busyOperation = "移除帳號"
+        defer { isBusy = false; busyOperation = nil }
+        do {
+            _ = try await request(
                 method: "remove_account",
                 params: ["account_id": .string(accountID), "delete_files": .bool(deleteFiles)]
             )
-            await self.refresh()
+            await refresh()
+            return true
+        } catch {
+            present(error: error)
+            return false
         }
     }
 
@@ -217,6 +233,7 @@ final class CoreClient: ObservableObject {
         }
         isBusy = true
         authInProgress = true
+        authenticatedAccountID = nil
         errorMessage = nil
         defer { isBusy = false }
         do {
@@ -419,10 +436,13 @@ final class CoreClient: ObservableObject {
     }
 
     func startScan(scope: String, dryRun: Bool) async {
+        guard !hasActiveScan else { return }
         guard selectedAccount?.running != true else {
             errorMessage = "請先停止即時防護，再掃描同一帳號的歷史訊息"
             return
         }
+        scanStartInFlight = true
+        defer { scanStartInFlight = false }
         do {
             scanProgress.removeAll()
             scanResult = nil
@@ -485,13 +505,24 @@ final class CoreClient: ObservableObject {
         } catch { present(error: error) }
     }
 
+    func shutdownGracefully() async {
+        guard helperIsRunning else { return }
+        do {
+            _ = try await request(method: "shutdown")
+            for _ in 0..<30 {
+                if !helperIsRunning { return }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        } catch {
+            present(error: error)
+        }
+        if helperIsRunning {
+            process?.terminate()
+        }
+    }
+
     func shutdown() {
-        guard let inputHandle else { return }
-        let request = RPCRequest(id: nextRequestID, method: "shutdown", params: nil)
-        nextRequestID += 1
-        guard var data = try? JSONEncoder().encode(request) else { return }
-        data.append(0x0A)
-        try? inputHandle.write(contentsOf: data)
+        Task { await shutdownGracefully() }
     }
 
     private func handleBackgroundLaunchIfNeeded() async {
@@ -585,12 +616,14 @@ final class CoreClient: ObservableObject {
             connectionMessage = authChallengeKind == "password" ? "需要 Telegram 兩步驟驗證" : "需要 Telegram 驗證碼"
         case "auth_succeeded":
             authInProgress = false
+            authenticatedAccountID = dictionary["account_id"] as? String
             authFlowID = nil
             authChallengeKind = nil
             connectionMessage = "Telegram 登入成功"
             Task { [weak self] in await self?.refresh() }
         case "auth_failed":
             authInProgress = false
+            authenticatedAccountID = nil
             authFlowID = nil
             authChallengeKind = nil
             let error = dictionary["error"] as? [String: Any]
@@ -646,6 +679,10 @@ final class CoreClient: ObservableObject {
     }
 
     private func sidecarTerminated(exitCode: Int32) {
+        stdoutReadHandle?.readabilityHandler = nil
+        stderrReadHandle?.readabilityHandler = nil
+        stdoutReadHandle = nil
+        stderrReadHandle = nil
         let message = exitCode == 0 ? "sidecar 已停止" : "sidecar 已停止（exit \(exitCode)）"
         connectionMessage = message
         process = nil

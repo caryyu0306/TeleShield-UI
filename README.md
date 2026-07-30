@@ -60,7 +60,7 @@ macOS-intel-swiftui.dmg
 macOS-arm-swiftui.dmg
 ```
 
-`*-swiftui.dmg` 是目前的 macOS 重構切片：SwiftUI 負責原生畫面，`TeleShieldCore` 以 local JSON-RPC sidecar 執行既有 Telethon 核心；目前先完成狀態、帳號列表與即時防護生命週期，登入 wizard、管理中心會逐步接上。
+`*-swiftui.dmg` 是 macOS 的完整管理中心版本：SwiftUI 負責原生畫面，`TeleShieldCore` 以 local JSON-RPC sidecar 執行既有 Telethon 核心。除了登入與即時防護，也包含帳號管理、歷史掃描／dry-run、白／黑名單、學習規則、報告、封鎖記錄、群組管理、OCR、Session 與開機啟動設定。
 
 ### SwiftUI + Python sidecar 架構
 

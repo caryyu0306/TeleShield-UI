@@ -18,6 +18,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -39,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from desktop_platform import is_start_on_login_enabled, set_start_on_login
-from teleshield import authenticate, load_config, listen, save_config
+from teleshield import authenticate, load_config, listen, save_config, scan_history
 
 
 class SetupWorker(QThread):
@@ -147,6 +148,69 @@ class ListenerWorker(QThread):
         self._stop_requested = True
         if self._loop and self._stop_event:
             self._loop.call_soon_threadsafe(self._stop_event.set)
+
+
+class HistoryScanWorker(QThread):
+    """Run a bounded history scan without blocking the Qt event loop."""
+
+    progress = Signal(str)
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, scope: str, dry_run: bool):
+        super().__init__()
+        self.scope = scope
+        self.dry_run = dry_run
+        self._cancel_event = threading.Event()
+
+    def run(self) -> None:
+        try:
+            result = asyncio.run(
+                scan_history(
+                    self.scope,
+                    dry_run=self.dry_run,
+                    progress_callback=self.progress.emit,
+                    cancel_event=self._cancel_event,
+                )
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+
+def format_scan_result(result: dict) -> str:
+    """Turn a scan result into a concise, non-sensitive UI summary."""
+    scope = "私訊" if result.get("scope") == "private" else "群組"
+    mode = "試運行（沒有執行封鎖／踢除）" if result.get("dry_run") else "已執行處理"
+    lines = [
+        f"{scope}掃描完成：{mode}",
+        f"掃描訊息：{result.get('messages_scanned', 0)}",
+        f"發現疑似廣告：{result.get('matched', 0)}",
+        f"已封鎖／踢除：{result.get('acted', 0)}",
+    ]
+    if result.get("groups_found"):
+        lines.append(f"可管理群組：{result['groups_found']}")
+    if result.get("cancelled"):
+        lines.append("狀態：使用者已取消")
+    errors = result.get("errors", [])
+    if errors:
+        lines.append(f"錯誤／跳過：{len(errors)}")
+    findings = result.get("findings", [])
+    if findings:
+        lines.append("")
+        lines.append("預覽結果：")
+        for finding in findings[:50]:
+            location = f" [{finding['group']}]" if finding.get("group") else ""
+            lines.append(
+                f"• {finding.get('name') or finding.get('user_id')}{location}"
+                f"：{finding.get('reason', '')[:80]}"
+            )
+        if len(findings) > 50:
+            lines.append(f"…另有 {len(findings) - 50} 筆未展開")
+    return "\n".join(lines)
 
 
 class SetupDialog(QDialog):
@@ -265,6 +329,130 @@ class SetupDialog(QDialog):
         super().reject()
 
 
+class HistoryScanDialog(QDialog):
+    """Preview and optionally apply a bounded history scan."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("掃描既有 Telegram 訊息")
+        self.setModal(True)
+        self.resize(650, 520)
+        self.worker: Optional[HistoryScanWorker] = None
+        self._closing = False
+
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItem("私訊（最近 30 個對話／14 天）", "private")
+        self.scope_combo.addItem("群組（管理員群組／最近 20 則／3 天）", "group")
+        self.preview_checkbox = QCheckBox("試運行：只預覽，不封鎖／踢除（建議先使用）")
+        self.preview_checkbox.setChecked(True)
+        self.status_label = QLabel("預設為安全預覽；確認結果後可取消勾選再執行。")
+        self.status_label.setWordWrap(True)
+        self.progress_view = QTextEdit()
+        self.progress_view.setReadOnly(True)
+        self.progress_view.setPlaceholderText("掃描進度與結果會顯示在這裡。")
+
+        self.start_button = QPushButton("開始預覽")
+        self.cancel_button = QPushButton("關閉")
+        self.preview_checkbox.toggled.connect(
+            lambda enabled: self.start_button.setText("開始預覽" if enabled else "開始處理")
+        )
+        self.start_button.clicked.connect(self.start_scan)
+        self.cancel_button.clicked.connect(self.cancel_or_close)
+
+        form = QFormLayout()
+        form.addRow("掃描範圍", self.scope_combo)
+        form.addRow("執行模式", self.preview_checkbox)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "歷史掃描只處理核心目前定義的近期範圍；掃描期間請先停止即時防護，"
+            "避免同一個 Telegram Session 同時被兩個背景工作使用。"
+        ))
+        layout.addLayout(form)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.progress_view)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        buttons.addWidget(self.start_button)
+        buttons.addWidget(self.cancel_button)
+        layout.addLayout(buttons)
+
+    def start_scan(self) -> None:
+        if self.worker and self.worker.isRunning():
+            return
+        dry_run = self.preview_checkbox.isChecked()
+        scope = self.scope_combo.currentData()
+        if not dry_run:
+            action = "封鎖私訊發送者" if scope == "private" else "踢除群組廣告發送者"
+            answer = QMessageBox.question(
+                self,
+                "確認執行危險操作",
+                f"這次掃描會實際{action}。\n\n確定要繼續嗎？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        self._closing = False
+        self.scope_combo.setEnabled(False)
+        self.preview_checkbox.setEnabled(False)
+        self.start_button.setEnabled(False)
+        self.cancel_button.setText("停止掃描")
+        self.cancel_button.setEnabled(True)
+        self.progress_view.clear()
+        self.status_label.setText("掃描中…")
+        self.worker = HistoryScanWorker(scope, dry_run)
+        self.worker.progress.connect(self.append_progress)
+        self.worker.completed.connect(self.scan_completed)
+        self.worker.failed.connect(self.scan_failed)
+        self.worker.start()
+
+    def append_progress(self, message: str) -> None:
+        self.progress_view.append(message)
+        self.status_label.setText(message)
+
+    def _reset_controls(self) -> None:
+        self.scope_combo.setEnabled(True)
+        self.preview_checkbox.setEnabled(True)
+        self.start_button.setEnabled(True)
+        self.start_button.setText("重新掃描")
+        self.cancel_button.setText("關閉")
+        self.cancel_button.setEnabled(True)
+
+    def scan_completed(self, result: dict) -> None:
+        self._reset_controls()
+        summary = format_scan_result(result)
+        self.progress_view.append("\n" + summary)
+        self.status_label.setText("掃描完成" if not result.get("cancelled") else "掃描已取消")
+        if self._closing:
+            self.accept()
+
+    def scan_failed(self, message: str) -> None:
+        self._reset_controls()
+        self.status_label.setText("掃描失敗")
+        self.progress_view.append(f"\n❌ 掃描失敗：{message}")
+        if self._closing:
+            self.reject()
+
+    def cancel_or_close(self) -> None:
+        if self.worker and self.worker.isRunning():
+            self._closing = True
+            self.worker.cancel()
+            self.cancel_button.setEnabled(False)
+            self.status_label.setText("正在停止掃描…")
+            return
+        self.reject()
+
+    def reject(self) -> None:
+        if self.worker and self.worker.isRunning():
+            self._closing = True
+            self.worker.cancel()
+            self.cancel_button.setEnabled(False)
+            self.status_label.setText("正在停止掃描…")
+            return
+        super().reject()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, background: bool = False):
         super().__init__()
@@ -314,12 +502,15 @@ class MainWindow(QMainWindow):
         self.setup_button = QPushButton("登入 Telegram")
         self.start_button = QPushButton("開始防護")
         self.stop_button = QPushButton("停止防護")
+        self.history_scan_button = QPushButton("掃描既有訊息")
         self.start_button.clicked.connect(self.start_protection)
         self.stop_button.clicked.connect(self.stop_protection)
         self.setup_button.clicked.connect(self.open_setup)
+        self.history_scan_button.clicked.connect(self.open_history_scan)
         actions.addWidget(self.setup_button)
         actions.addWidget(self.start_button)
         actions.addWidget(self.stop_button)
+        actions.addWidget(self.history_scan_button)
         layout.addLayout(actions)
 
         tabs = QTabWidget()
@@ -445,6 +636,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("防護中" if running else "已停止")
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
+        self.history_scan_button.setEnabled(not running)
         self.count_label.setText(
             f"白 {len(cfg.get('whitelist', {}))} / 黑 {len(cfg.get('blacklist', {}))} / "
             f"私訊封鎖 {cfg.get('blocked_count', 0)} / 群組踢除 {cfg.get('kicked_count', 0)}"
@@ -483,6 +675,23 @@ class MainWindow(QMainWindow):
         self.listener.stop()
         if not self.listener.wait(10000):
             QMessageBox.warning(self, "停止逾時", "Telegram 連線尚未回應，請稍後再試。")
+
+    def open_history_scan(self) -> None:
+        if self.listener and self.listener.isRunning():
+            QMessageBox.information(
+                self,
+                "請先停止即時防護",
+                "歷史掃描需要獨佔 Telegram Session；請先停止即時防護再開始掃描。",
+            )
+            return
+        if not load_config().get("api_id"):
+            QMessageBox.information(self, "尚未登入", "請先登入 Telegram。")
+            self.open_setup()
+            if not load_config().get("api_id"):
+                return
+        dialog = HistoryScanDialog(self)
+        dialog.exec()
+        self.refresh_status()
 
     def listener_stopped(self, message: str) -> None:
         self.log_view.append(f"[{self.now()}] {message}")

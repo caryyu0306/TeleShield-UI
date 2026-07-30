@@ -442,6 +442,232 @@ async def setup(api_id: str = None, api_hash: str = None, phone: str = None, cod
         print(f"\n❌ 登入失敗: {e}")
         return False
 
+# ──────────── 歷史訊息掃描核心 ────────────
+
+async def scan_history(
+    scope: str = "private",
+    dry_run: bool = False,
+    progress_callback=None,
+    cancel_event=None,
+):
+    """Scan recent private/group history and optionally apply moderation.
+
+    This API is UI-friendly: it never prompts on stdin, reports progress through
+    ``progress_callback``, and checks ``cancel_event`` between Telegram calls.
+    The existing CLI commands remain available below for backwards compatibility.
+    """
+    from telethon import TelegramClient
+    from telethon.tl.functions.channels import EditBannedRequest
+    from telethon.tl.functions.contacts import BlockRequest, GetContactsRequest
+    from telethon.tl.types import Chat, ChatBannedRights, Channel, User
+
+    if scope not in {"private", "group"}:
+        raise ValueError("scope 必須是 private 或 group")
+
+    cfg = load_config()
+    if not cfg.get("api_id"):
+        raise RuntimeError("尚未登入 Telegram")
+
+    result = {
+        "scope": scope,
+        "dry_run": dry_run,
+        "dialogs_seen": 0,
+        "dialogs_scanned": 0,
+        "groups_found": 0,
+        "messages_scanned": 0,
+        "matched": 0,
+        "acted": 0,
+        "errors": [],
+        "findings": [],
+        "cancelled": False,
+    }
+    now = datetime.now(timezone.utc)
+
+    def cancelled() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
+    def progress(message: str) -> None:
+        if progress_callback:
+            progress_callback(message)
+
+    def add_error(message: str) -> None:
+        result["errors"].append(message)
+        progress(f"⚠️ {message}")
+
+    client = TelegramClient(str(SESSION_FILE), cfg["api_id"], cfg["api_hash"])
+    connected = False
+    try:
+        progress("正在連線 Telegram…")
+        await client.connect()
+        connected = True
+        if not await client.is_user_authorized():
+            raise RuntimeError("Telegram Session 已失效，請先重新登入")
+        if cancelled():
+            result["cancelled"] = True
+            return result
+
+        contacts = (await client(GetContactsRequest(hash=0))).users
+        contact_ids = {contact.id for contact in contacts}
+
+        if scope == "private":
+            dialogs = await client.get_dialogs(limit=30)
+            total = len(dialogs)
+            for index, dialog in enumerate(dialogs, 1):
+                result["dialogs_seen"] += 1
+                if cancelled():
+                    result["cancelled"] = True
+                    break
+                entity = dialog.entity
+                if (
+                    not isinstance(entity, User)
+                    or entity.is_self
+                    or entity.bot
+                    or entity.id in contact_ids
+                    or is_whitelisted(entity.id, cfg)
+                ):
+                    continue
+                result["dialogs_scanned"] += 1
+                progress(f"掃描私訊 {index}/{total}…")
+                try:
+                    messages = await client.get_messages(entity, limit=5)
+                except Exception as exc:
+                    add_error(f"私訊讀取失敗（{entity.id}）：{exc}")
+                    continue
+                result["messages_scanned"] += len(messages)
+
+                for message in messages:
+                    if cancelled():
+                        result["cancelled"] = True
+                        break
+                    if not message:
+                        continue
+                    if message.date and message.date < now - timedelta(days=14):
+                        continue
+                    reason = message.text or ""
+                    if not is_spam(reason, cfg) and message.photo:
+                        ocr_text = await check_photo(client, message)
+                        if ocr_text and is_spam(ocr_text, cfg):
+                            reason = f"[OCR] {ocr_text[:100]}"
+                    if not reason or not is_spam(reason, cfg):
+                        continue
+
+                    result["matched"] += 1
+                    name = f"{entity.first_name or ''} {entity.last_name or ''}".strip()
+                    finding = {
+                        "user_id": entity.id,
+                        "name": name or str(entity.id),
+                        "reason": reason[:120],
+                    }
+                    result["findings"].append(finding)
+                    progress(f"⚠️ 發現私訊廣告：{finding['name']}")
+                    if dry_run:
+                        break
+                    try:
+                        await client(BlockRequest(id=entity.id))
+                        result["acted"] += 1
+                        log_block(entity.id, finding["name"], reason, "scan")
+                        progress(f"✅ 已封鎖：{finding['name']}")
+                    except Exception as exc:
+                        add_error(f"封鎖失敗（{entity.id}）：{exc}")
+                    break
+        else:
+            me = await client.get_me()
+            dialogs = await client.get_dialogs(limit=50)
+            groups = []
+            for dialog in dialogs:
+                result["dialogs_seen"] += 1
+                entity = dialog.entity
+                if not isinstance(entity, (Chat, Channel)) or getattr(entity, "broadcast", False):
+                    continue
+                try:
+                    permissions = await client.get_permissions(entity, me.id)
+                    if permissions and permissions.is_admin:
+                        groups.append(dialog)
+                except Exception as exc:
+                    add_error(f"群組權限讀取失敗（{getattr(entity, 'title', entity.id)}）：{exc}")
+            result["groups_found"] = len(groups)
+            progress(f"找到 {len(groups)} 個可管理群組")
+
+            handled = set()
+            for group_index, dialog in enumerate(groups, 1):
+                if cancelled():
+                    result["cancelled"] = True
+                    break
+                entity = dialog.entity
+                title = getattr(entity, "title", "未知群組")
+                progress(f"掃描群組 {group_index}/{len(groups)}：{title}")
+                try:
+                    messages = await client.get_messages(entity, limit=20)
+                except Exception as exc:
+                    add_error(f"群組讀取失敗（{title}）：{exc}")
+                    continue
+                result["messages_scanned"] += len(messages)
+
+                for message in messages:
+                    if cancelled():
+                        result["cancelled"] = True
+                        break
+                    if (
+                        not message
+                        or not message.sender_id
+                        or message.sender_id == me.id
+                        or message.sender_id in contact_ids
+                        or is_whitelisted(message.sender_id, cfg)
+                    ):
+                        continue
+                    if message.date and message.date < now - timedelta(days=3):
+                        continue
+
+                    reason = message.text or ""
+                    if not is_spam(reason, cfg) and message.photo:
+                        ocr_text = await check_photo(client, message)
+                        if ocr_text and is_spam(ocr_text, cfg):
+                            reason = f"[OCR] {ocr_text[:80]}"
+                    if not reason or not is_spam(reason, cfg):
+                        continue
+
+                    result["matched"] += 1
+                    try:
+                        sender = await client.get_entity(message.sender_id)
+                        name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+                    except Exception:
+                        name = str(message.sender_id)
+                    finding = {
+                        "user_id": message.sender_id,
+                        "name": name or str(message.sender_id),
+                        "group": title,
+                        "reason": reason[:100],
+                    }
+                    result["findings"].append(finding)
+                    progress(f"⚠️ 發現群組廣告：{title}／{finding['name']}")
+                    action_key = (entity.id, message.sender_id)
+                    if dry_run or action_key in handled:
+                        continue
+                    handled.add(action_key)
+                    try:
+                        rights = ChatBannedRights(until_date=None, view_messages=True)
+                        await client(EditBannedRequest(entity, message.sender_id, rights))
+                        result["acted"] += 1
+                        log_block(message.sender_id, finding["name"], reason, "group")
+                        progress(f"✅ 已踢除：{finding['name']}（{title}）")
+                    except Exception as exc:
+                        add_error(f"踢除失敗（{message.sender_id}／{title}）：{exc}")
+
+        if not dry_run:
+            if scope == "private":
+                cfg["blocked_count"] = cfg.get("blocked_count", 0) + result["acted"]
+            else:
+                cfg["kicked_count"] = cfg.get("kicked_count", 0) + result["acted"]
+            cfg["last_scan"] = now.isoformat()
+        else:
+            cfg["last_preview"] = now.isoformat()
+        save_config(cfg)
+        return result
+    finally:
+        if connected:
+            await client.disconnect()
+
+
 # ──────────── 掃描私訊封鎖 ────────────
 
 async def scan_and_block(dry_run: bool = False):

@@ -216,11 +216,13 @@ class SetupDialog(QDialog):
             "FlashCall": "閃電電話",
             "MissedCall": "未接來電",
         }
-        destination = labels.get(delivery, delivery)
+        method, separator, details = delivery.partition("；")
+        destination = labels.get(method, method)
+        detail_text = f"\n{details}" if separator and details else ""
         QMessageBox.information(
             self,
             "驗證碼已請求",
-            f"Telegram 回報的投遞方式：{destination}。\n\n"
+            f"Telegram 回報的投遞方式：{destination}。{detail_text}\n\n"
             "請先查看其他已登入裝置的 Telegram，尤其是官方「Telegram」服務訊息；"
             "第三方登入不一定會收到 SMS。",
         )

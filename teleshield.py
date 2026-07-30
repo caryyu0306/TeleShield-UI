@@ -360,7 +360,17 @@ async def authenticate(
             sent_code = await client.send_code_request(phone)
             if status_callback:
                 delivery = type(getattr(sent_code, "type", None)).__name__
-                status_callback(delivery.replace("SentCodeType", "") or "未知方式")
+                delivery = delivery.replace("SentCodeType", "") or "未知方式"
+                details = []
+                next_type = getattr(sent_code, "next_type", None)
+                if next_type is not None:
+                    next_delivery = type(next_type).__name__.replace("SentCodeType", "")
+                    if next_delivery:
+                        details.append(f"下一個可用方式：{next_delivery}")
+                timeout = getattr(sent_code, "timeout", None)
+                if timeout is not None:
+                    details.append(f"等待時間：{timeout} 秒")
+                status_callback("；".join([delivery, *details]))
             code_value = await code_callback()
             if not code_value:
                 raise ValueError("Telegram 驗證碼不可為空")

@@ -240,9 +240,14 @@ final class CoreClient: ObservableObject {
     func submitAuthPassword(_ value: String) async { await submitAuthValue(value, method: "submit_auth_password") }
 
     func cancelAuthentication() async {
-        guard let authFlowID else { return }
-        do { _ = try await request(method: "cancel_auth", params: ["flow_id": .string(authFlowID)]) }
-        catch { present(error: error) }
+        guard let flowID = authFlowID else { return }
+        do {
+            _ = try await request(method: "cancel_auth", params: ["flow_id": .string(flowID)])
+            for _ in 0..<20 {
+                if authFlowID != flowID { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        } catch { present(error: error) }
         authInProgress = false
         self.authFlowID = nil
         authChallengeKind = nil
@@ -252,7 +257,6 @@ final class CoreClient: ObservableObject {
         guard let authFlowID, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         do {
             _ = try await request(method: method, params: ["flow_id": .string(authFlowID), "value": .string(value)])
-            authChallengeKind = nil
         } catch { present(error: error) }
     }
 

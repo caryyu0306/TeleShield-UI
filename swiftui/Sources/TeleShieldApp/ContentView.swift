@@ -32,6 +32,7 @@ struct ContentView: View {
     @ObservedObject var client: CoreClient
     @State private var section: AppSection? = .overview
     @State private var showLogin = false
+    @State private var temporaryLoginAccountID: String?
 
     var body: some View {
         NavigationSplitView {
@@ -48,7 +49,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showLogin) {
-            LoginSheet(client: client)
+            LoginSheet(client: client, temporaryAccountID: $temporaryLoginAccountID)
         }
     }
 
@@ -65,7 +66,8 @@ struct ContentView: View {
                 }
                 Button {
                     Task {
-                        if await client.createAccount() != nil {
+                        if let accountID = await client.createAccount() {
+                            temporaryLoginAccountID = accountID
                             section = .accounts
                             showLogin = true
                         }
@@ -805,6 +807,7 @@ private struct AccountsView: View {
 
 private struct LoginSheet: View {
     @ObservedObject var client: CoreClient
+    @Binding var temporaryAccountID: String?
     @Environment(\.dismiss) private var dismiss
     @State private var apiID = ""
     @State private var apiHash = ""
@@ -820,7 +823,7 @@ private struct LoginSheet: View {
                     Text("目前帳號：\(client.selectedAccount?.label ?? "尚未選取")").foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("關閉") { dismiss() }
+                Button("關閉") { closeLogin() }
             }
             Divider()
             Text("API 憑證只會交給本機 sidecar；請勿把 Hash 或 2FA 密碼貼到聊天或記錄中。")
@@ -841,25 +844,41 @@ private struct LoginSheet: View {
             HStack {
                 if client.authChallengeKind == "code" {
                     Button("送出驗證碼") { Task { await client.submitAuthCode(code) } }
+                        .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || client.isBusy)
                 } else if client.authChallengeKind == "password" {
                     Button("送出 2FA 密碼") { Task { await client.submitAuthPassword(password) } }
+                        .disabled(password.isEmpty || client.isBusy)
                 } else {
                     Button("開始登入") { Task { await client.startAuthentication(apiID: apiID, apiHash: apiHash, phone: phone) } }
                         .buttonStyle(.borderedProminent)
-                        .disabled(apiID.isEmpty || apiHash.isEmpty || phone.isEmpty || client.isBusy)
+                        .disabled(apiID.isEmpty || apiHash.isEmpty || phone.isEmpty || client.isBusy || client.authInProgress)
                 }
                 if client.authFlowID != nil {
-                    Button("取消登入") { Task { await client.cancelAuthentication() } }
+                    Button("取消登入") { closeLogin() }
                 }
                 Spacer()
                 if !client.authInProgress && client.selectedAccount?.configured == true {
-                    Button("完成") { dismiss() }
+                    Button("完成") { temporaryAccountID = nil; dismiss() }
                 }
             }
             if let error = client.errorMessage { Text(error).foregroundStyle(.red).font(.callout) }
         }
         .padding(28)
         .frame(width: 520)
+    }
+
+    private func closeLogin() {
+        Task {
+            if client.authFlowID != nil {
+                await client.cancelAuthentication()
+            }
+            if let accountID = temporaryAccountID,
+               client.selectedAccount?.configured != true {
+                await client.removeAccount(accountID, deleteFiles: true)
+                temporaryAccountID = nil
+            }
+            dismiss()
+        }
     }
 }
 

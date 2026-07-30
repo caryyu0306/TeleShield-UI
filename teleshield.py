@@ -18,11 +18,29 @@ Telegram 廣告封鎖工具 — TeleShield 完整版
 import asyncio, os, json, re, sys, time, tempfile, random
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from telethon import events
 from collections import defaultdict
 
 # ──────────── 設定 ────────────
-SESSION_DIR = Path("/root/.tg-sessions")
+
+def default_session_dir() -> Path:
+    """Return a writable per-user data directory on every supported OS."""
+    override = os.getenv("TELESHIELD_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    if sys.platform == "win32":
+        root = Path(os.getenv("APPDATA", Path.home() / "AppData/Roaming"))
+        return root / "TeleShield"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "TeleShield"
+
+    root = Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local/share"))
+    return root / "TeleShield"
+
+
+SESSION_DIR = default_session_dir()
 SESSION_FILE = SESSION_DIR / "user.session"
 CONFIG_FILE = SESSION_DIR / "config.json"
 BLOCK_LOG = SESSION_DIR / "block_log.json"
@@ -56,7 +74,9 @@ def load_config():
 
 def save_config(cfg):
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+    tmp_file = CONFIG_FILE.with_suffix(".json.tmp")
+    tmp_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+    os.replace(tmp_file, CONFIG_FILE)
 
 def load_block_log():
     if BLOCK_LOG.exists():
@@ -64,6 +84,7 @@ def load_block_log():
     return {"blocks": []}
 
 def save_block_log(log):
+    BLOCK_LOG.parent.mkdir(parents=True, exist_ok=True)
     BLOCK_LOG.write_text(json.dumps(log, indent=2, ensure_ascii=False))
 
 def load_learned_patterns():
@@ -73,6 +94,7 @@ def load_learned_patterns():
     return {"keywords": [], "patterns": []}
 
 def save_learned_patterns(data):
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
     (SESSION_DIR / "learned_patterns.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 def is_spam(text: str, cfg: dict = None) -> bool:
@@ -200,7 +222,9 @@ async def learn(text: str):
 async def manage_list(action: str, list_type: str, user_id_str: str = None):
     """管理白名單或黑名單"""
     cfg = load_config()
-    key = f"{list_type}_list"
+    # Runtime checks use the canonical keys ``whitelist`` and ``blacklist``.
+    # Keep the CLI and desktop UI on the same schema.
+    key = list_type
     lst = cfg.get(key, {})
 
     if action == "list":
@@ -307,8 +331,60 @@ async def report(period: str = "day"):
 
 # ──────────── 首次設定 ────────────
 
-async def setup(api_id: str = None, api_hash: str = None, phone: str = None, code: str = None):
+async def authenticate(
+    api_id: str,
+    api_hash: str,
+    phone: str,
+    code_callback,
+    password_callback,
+):
+    """Authenticate the personal Telegram client without requiring a CLI prompt."""
     from telethon import TelegramClient
+    from telethon.errors import SessionPasswordNeededError
+
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    client = TelegramClient(str(SESSION_FILE), int(api_id), api_hash)
+
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.send_code_request(phone)
+            code_value = await code_callback()
+            if not code_value:
+                raise ValueError("Telegram 驗證碼不可為空")
+            try:
+                await client.sign_in(phone=phone, code=code_value)
+            except SessionPasswordNeededError:
+                password_value = await password_callback()
+                if not password_value:
+                    raise ValueError("Telegram 兩步驟驗證密碼不可為空")
+                await client.sign_in(password=password_value)
+
+        me = await client.get_me()
+        cfg = load_config()
+        cfg.update({
+            "api_id": int(api_id),
+            "api_hash": api_hash,
+            "phone": phone,
+            "user_id": me.id,
+            "username": me.username,
+        })
+        cfg.setdefault("blocked_count", 0)
+        cfg.setdefault("kicked_count", 0)
+        cfg.setdefault("last_scan", None)
+        cfg.setdefault("whitelist", {})
+        cfg.setdefault("blacklist", {})
+        cfg.setdefault("managed_groups", [])
+        cfg.setdefault("learned_patterns", {"keywords": [], "patterns": []})
+        cfg.setdefault("listen_scan_groups", True)
+        cfg.setdefault("auto_start_protection", False)
+        save_config(cfg)
+        return me
+    finally:
+        await client.disconnect()
+
+
+async def setup(api_id: str = None, api_hash: str = None, phone: str = None, code: str = None):
 
     print("\n═══════════════════════════════")
     print("  TeleShield - 設定")
@@ -327,33 +403,18 @@ async def setup(api_id: str = None, api_hash: str = None, phone: str = None, cod
     else:
         print(f"手機隱藏")
 
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    client = TelegramClient(str(SESSION_FILE), int(api_id), api_hash)
-
     try:
-        await client.start(phone=phone, code_callback=lambda: code or input("請輸入驗證碼: "))
-        me = await client.get_me()
+        async def code_callback():
+            return code or await asyncio.to_thread(input, "請輸入驗證碼: ")
+
+        async def password_callback():
+            return await asyncio.to_thread(input, "請輸入兩步驟驗證密碼: ")
+
+        me = await authenticate(api_id, api_hash, phone, code_callback, password_callback)
         print(f"\n✅ 登入成功！")
         print(f"   帳號: {me.first_name} (@{me.username or '無'})")
         print(f"   ID: {me.id}")
-
-        save_config({
-            "api_id": int(api_id),
-            "api_hash": api_hash,
-            "phone": phone,
-            "user_id": me.id,
-            "username": me.username,
-            "blocked_count": 0,
-            "kicked_count": 0,
-            "last_scan": None,
-            "whitelist": {},
-            "blacklist": {},
-            "managed_groups": [],
-            "learned_patterns": {"keywords": [], "patterns": []},
-            "listen_scan_groups": True,
-        })
         print("✅ 設定已儲存")
-        await client.disconnect()
         return True
     except Exception as e:
         print(f"\n❌ 登入失敗: {e}")
@@ -573,7 +634,7 @@ async def scan_groups(dry_run: bool = False):
 
 # ──────────── 即時監聽（私訊+群組） ────────────
 
-async def listen():
+async def listen(stop_event: Optional[asyncio.Event] = None):
     from telethon import TelegramClient
     from telethon.tl.functions.contacts import BlockRequest
     from telethon.tl.functions.channels import EditBannedRequest
@@ -598,6 +659,10 @@ async def listen():
         msg = event.message
         if not msg or not msg.sender_id:
             return
+
+        # Reload settings so desktop and Bot controls take effect without
+        # restarting the long-running Telethon client.
+        cfg = load_config()
 
         sender_id = msg.sender_id
         chat = await event.get_chat()
@@ -719,14 +784,32 @@ async def listen():
                 print(f"     ❌ 踢除失敗: {e}")
 
     try:
-        await client.start(phone=cfg["phone"])
+        # Do not call ``start(phone=...)`` here: in a windowless packaged app
+        # Telethon could fall back to stdin prompts if the Session expires.
+        await client.connect()
+        if not await client.is_user_authorized():
+            print("❌ Telegram Session 已失效，請從桌面 App 重新登入")
+            return
         print(f"✅ TeleShield 已上線 — 監聽中...")
-        await client.run_until_disconnected()
+        run_task = asyncio.create_task(client.run_until_disconnected())
+        if stop_event is None:
+            await run_task
+        else:
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait(
+                {run_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done and not run_task.done():
+                await client.disconnect()
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
     except KeyboardInterrupt:
         print("\n\n👋 已停止")
-        await client.disconnect()
     except Exception as e:
         print(f"\n❌ 錯誤: {e}")
+    finally:
         await client.disconnect()
 
 # ──────────── 主程式 ────────────

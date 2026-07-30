@@ -28,6 +28,32 @@
 
 ---
 
+## 🖥️ Desktop App（測試版）
+
+本 fork 正在把 TeleShield 包裝成一般使用者可以直接安裝的桌面應用程式：
+
+- PySide6 GUI，不需要使用者執行 CLI
+- Telegram 個人帳號登入流程
+- 關閉主視窗只會隱藏到系統匣，背景防護仍然執行
+- 系統匣選單可重新開啟、開始／停止防護或真正結束程式
+- 可選擇登入作業系統時自動啟動，並自動開始防護
+- Session、設定與封鎖紀錄放在使用者資料目錄，不寫入 App bundle
+
+### GitHub Actions 測試版
+
+本機不需要打包。到 GitHub Actions 手動執行 **Desktop test builds** workflow，或推送到 `main`／`feat/*` 分支後等待建置完成，即可下載：
+
+```text
+macOS-intel.dmg
+macOS-arm.dmg
+```
+
+目前是未簽署測試版，macOS 可能顯示「無法驗證開發者」。此階段先用右鍵「打開」允許測試；正式發布再加入 Apple Developer signing 與 notarization。
+
+> DMG 內的 App 仍然是以使用者個人 Telegram 身份執行。請只在自己的電腦使用，並妥善保護 Session。
+
+---
+
 ## ✨ 功能 / Features
 
 | 功能 | 命令 | 說明 |

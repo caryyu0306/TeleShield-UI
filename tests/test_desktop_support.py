@@ -1,9 +1,12 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
 import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import telethon
 import teleshield
 from desktop_platform import application_command
@@ -321,6 +324,8 @@ def test_learn_text_returns_changes_and_persists_rules(monkeypatch, tmp_path):
     assert result["added_patterns"]
     cfg = teleshield.load_config()
     assert "投資穩賺" in cfg["learned_patterns"]["keywords"]
+    learned_file = teleshield._legacy_account_store().learned_patterns_file
+    assert json.loads(learned_file.read_text(encoding="utf-8")) == cfg["learned_patterns"]
     assert teleshield.is_spam("這是投資穩賺廣告", cfg)
 
 
@@ -570,3 +575,320 @@ def test_logout_account_calls_telegram_and_clears_local_identity(monkeypatch, tm
     assert not teleshield.SESSION_FILE.exists()
     assert "user_id" not in teleshield.load_config()
     assert "api_hash" not in teleshield.load_config()
+
+
+def test_create_account_initializes_isolated_json_files(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    store = teleshield.account_store("account-a")
+
+    assert store.root.is_dir()
+    assert json.loads(store.config_file.read_text(encoding="utf-8")) == {}
+    assert json.loads(store.block_log.read_text(encoding="utf-8")) == {"blocks": []}
+    assert json.loads(store.learned_patterns_file.read_text(encoding="utf-8")) == {
+        "keywords": [],
+        "patterns": [],
+    }
+    for path in (store.config_file, store.block_log, store.learned_patterns_file):
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_account_storage_isolated_for_config_session_and_logs(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+
+    account_a = teleshield.create_account("account-a")
+    account_b = teleshield.create_account("account-b")
+    teleshield.save_config({"user_id": 101, "username": "alpha"}, account_id="account-a")
+    teleshield.save_config({"user_id": 202, "username": "beta"}, account_id="account-b")
+    teleshield.save_block_log({"blocks": [{"user_id": 101, "source": "private"}]}, account_id="account-a")
+    teleshield.save_block_log({"blocks": [{"user_id": 202, "source": "group"}]}, account_id="account-b")
+
+    assert account_a["id"] == "account-a"
+    assert account_b["id"] == "account-b"
+    assert teleshield.load_config(account_id="account-a")["user_id"] == 101
+    assert teleshield.load_config(account_id="account-b")["user_id"] == 202
+    assert teleshield.load_block_log(account_id="account-a")["blocks"][0]["user_id"] == 101
+    assert teleshield.load_block_log(account_id="account-b")["blocks"][0]["user_id"] == 202
+    assert teleshield.account_store("account-a").session_file != teleshield.account_store("account-b").session_file
+    assert teleshield.account_store("account-a").config_file.parent != teleshield.account_store("account-b").config_file.parent
+
+
+def test_active_account_context_selects_only_one_default_without_cross_contamination(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.create_account("account-b")
+    teleshield.save_config({"user_id": 101}, account_id="account-a")
+    teleshield.save_config({"user_id": 202}, account_id="account-b")
+
+    teleshield.set_active_account("account-b")
+    assert teleshield.get_active_account_id() == "account-b"
+    assert teleshield.load_config()["user_id"] == 202
+
+    with teleshield.account_context("account-a"):
+        assert teleshield.load_config()["user_id"] == 101
+        teleshield.save_config({"user_id": 111})
+
+    assert teleshield.load_config(account_id="account-a")["user_id"] == 111
+    assert teleshield.load_config(account_id="account-b")["user_id"] == 202
+
+
+def test_legacy_single_account_is_migrated_to_isolated_account_store(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.SESSION_FILE.write_bytes(b"legacy-session")
+    teleshield.save_config({
+        "api_id": 1234,
+        "api_hash": "[REDACTED]",
+        "phone": "+100****0000",
+        "user_id": 42,
+        "username": "legacy_user",
+    })
+    teleshield.save_block_log({"blocks": [{"user_id": 7, "source": "private"}]})
+
+    records = teleshield.ensure_account_registry()
+
+    assert len(records) == 1
+    account_id = records[0]["id"]
+    assert records[0]["user_id"] == 42
+    assert teleshield.get_active_account_id() == account_id
+    store = teleshield.account_store(account_id)
+    assert store.session_file.read_bytes() == b"legacy-session"
+    assert teleshield.load_config()["username"] == "legacy_user"
+    assert teleshield.load_block_log()["blocks"][0]["user_id"] == 7
+    assert not teleshield.SESSION_FILE.exists()
+    assert not teleshield.CONFIG_FILE.exists()
+
+
+def test_authenticate_uses_the_selected_account_session_path(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.create_account("account-b")
+    session_paths = []
+
+    class FakeClient:
+        def __init__(self, session, *args):
+            session_paths.append(session)
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return False
+
+        async def send_code_request(self, phone):
+            return SimpleNamespace(type=SimpleNamespace())
+
+        async def sign_in(self, **kwargs):
+            pass
+
+        async def get_me(self):
+            return SimpleNamespace(id=len(session_paths), username="account_user", first_name="Account")
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        for account_id in ("account-a", "account-b"):
+            asyncio.run(
+                teleshield.authenticate(
+                    "1234",
+                    "[REDACTED]",
+                    "+100****0000",
+                    lambda: asyncio.sleep(0, result="[REDACTED]"),
+                    lambda: asyncio.sleep(0, result="[REDACTED]"),
+                    account_id=account_id,
+                )
+            )
+
+    assert len(session_paths) == 2
+    assert session_paths[0] != session_paths[1]
+    assert str(teleshield.account_store("account-a").session_file) == session_paths[0]
+    assert str(teleshield.account_store("account-b").session_file) == session_paths[1]
+
+
+def test_authenticate_rejects_duplicate_identity_without_overwriting_existing_account(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.create_account("account-b")
+    teleshield.save_config({"user_id": 101, "username": "account-a"}, account_id="account-a")
+    teleshield.save_config({"user_id": 202, "username": "account-b"}, account_id="account-b")
+    teleshield.update_account_identity(
+        "account-a",
+        SimpleNamespace(id=101, username="account-a", first_name="A"),
+    )
+    teleshield.update_account_identity(
+        "account-b",
+        SimpleNamespace(id=202, username="account-b", first_name="B"),
+    )
+    original_session = teleshield.account_store("account-a").session_file
+    original_session.write_bytes(b"original-account-a-session")
+
+    class FakeClient:
+        def __init__(self, session, *args):
+            self.session = Path(session)
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return False
+
+        async def send_code_request(self, phone):
+            return SimpleNamespace(type=SimpleNamespace())
+
+        async def sign_in(self, **kwargs):
+            self.session.write_bytes(b"duplicate-account-b-session")
+
+        async def get_me(self):
+            return SimpleNamespace(id=202, username="account-b", first_name="B")
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        with pytest.raises(ValueError, match="已經存在"):
+            asyncio.run(
+                teleshield.authenticate(
+                    "1234",
+                    "[REDACTED]",
+                    "+100****0000",
+                    lambda: asyncio.sleep(0, result="[REDACTED]"),
+                    lambda: asyncio.sleep(0, result="[REDACTED]"),
+                    account_id="account-a",
+                )
+            )
+
+    assert teleshield.load_config(account_id="account-a")["user_id"] == 101
+    assert teleshield.get_account("account-a")["user_id"] == 101
+    assert original_session.read_bytes() == b"original-account-a-session"
+
+
+def test_logout_one_account_does_not_touch_another_account(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.create_account("account-b")
+    for account_id, user_id in (("account-a", 101), ("account-b", 202)):
+        teleshield.save_config({
+            "api_id": 1234,
+            "api_hash": "[REDACTED]",
+            "phone": "+100****0000",
+            "user_id": user_id,
+            "username": account_id,
+        }, account_id=account_id)
+        teleshield.update_account_identity(
+            account_id,
+            SimpleNamespace(id=user_id, username=account_id, first_name=account_id),
+            "+100****0000",
+        )
+        teleshield.account_store(account_id).session_file.write_bytes(account_id.encode())
+
+    class FakeClient:
+        def __init__(self, session, *args):
+            self.session = session
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def log_out(self):
+            pass
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        assert asyncio.run(teleshield.logout_account(remove_credentials=True, account_id="account-a")) is True
+
+    assert not teleshield.account_store("account-a").session_file.exists()
+    assert teleshield.account_store("account-b").session_file.read_bytes() == b"account-b"
+    assert "api_id" not in teleshield.load_config(account_id="account-a")
+    assert teleshield.load_config(account_id="account-b")["user_id"] == 202
+    assert teleshield.get_account("account-b")["user_id"] == 202
+
+
+def test_concurrent_listeners_keep_account_context_and_session_isolated(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.create_account("account-b")
+    for account_id, user_id in (("account-a", 101), ("account-b", 202)):
+        teleshield.save_config({
+            "api_id": 1234,
+            "api_hash": "[REDACTED]",
+            "user_id": user_id,
+            "username": account_id,
+            "whitelist": {},
+            "blacklist": {},
+        }, account_id=account_id)
+
+    session_paths = []
+
+    class FakeClient:
+        def __init__(self, session, *args):
+            self.session = session
+            self.disconnected = asyncio.Event()
+            session_paths.append(session)
+
+        def on(self, event):
+            return lambda handler: handler
+
+        async def connect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def run_until_disconnected(self):
+            await self.disconnected.wait()
+
+        async def disconnect(self):
+            self.disconnected.set()
+
+    async def run_listener(account_id):
+        stop_event = asyncio.Event()
+        result = await teleshield.listen(
+            stop_event=stop_event,
+            ready_callback=stop_event.set,
+            account_id=account_id,
+        )
+        return result
+
+    async def run_all():
+        return await asyncio.gather(run_listener("account-a"), run_listener("account-b"))
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        results = asyncio.run(run_all())
+
+    assert results == [True, True]
+    assert sorted(session_paths) == sorted([
+        str(teleshield.account_store("account-a").session_file),
+        str(teleshield.account_store("account-b").session_file),
+    ])
+
+
+def test_account_store_hardens_account_directory_and_known_data_files(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    store = teleshield.account_store("account-a")
+    store.ensure()
+    for path in (
+        store.session_file,
+        Path(f"{store.session_file}-journal"),
+        store.config_file,
+        store.block_log,
+        store.learned_patterns_file,
+    ):
+        path.write_text("{}", encoding="utf-8")
+        path.chmod(0o644)
+
+    store.ensure()
+
+    assert store.root.stat().st_mode & 0o777 == 0o700
+    for path in (
+        store.session_file,
+        Path(f"{store.session_file}-journal"),
+        store.config_file,
+        store.block_log,
+        store.learned_patterns_file,
+    ):
+        assert path.stat().st_mode & 0o777 == 0o600

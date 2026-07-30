@@ -642,7 +642,7 @@ async def scan_groups(dry_run: bool = False):
 
 # ──────────── 即時監聽（私訊+群組） ────────────
 
-async def listen(stop_event: Optional[asyncio.Event] = None):
+async def listen(stop_event: Optional[asyncio.Event] = None, ready_callback=None) -> bool:
     from telethon import TelegramClient
     from telethon.tl.functions.contacts import BlockRequest
     from telethon.tl.functions.channels import EditBannedRequest
@@ -652,7 +652,7 @@ async def listen(stop_event: Optional[asyncio.Event] = None):
     cfg = load_config()
     if not cfg.get("api_id"):
         print("❌ 尚未設定")
-        return
+        return False
 
     print("👂 TeleShield 即時監聽啟動中...")
     print("    ✅ 私訊廣告 → 自動封鎖")
@@ -797,7 +797,9 @@ async def listen(stop_event: Optional[asyncio.Event] = None):
         await client.connect()
         if not await client.is_user_authorized():
             print("❌ Telegram Session 已失效，請從桌面 App 重新登入")
-            return
+            return False
+        if ready_callback:
+            ready_callback()
         print(f"✅ TeleShield 已上線 — 監聽中...")
         run_task = asyncio.create_task(client.run_until_disconnected())
         if stop_event is None:
@@ -808,17 +810,25 @@ async def listen(stop_event: Optional[asyncio.Event] = None):
                 {run_task, stop_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if stop_task in done and not run_task.done():
+            if run_task in done:
+                # Retrieve listener exceptions so asyncio does not emit an
+                # unhandled "Task exception was never retrieved" warning.
+                await run_task
+            elif stop_task in done:
                 await client.disconnect()
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
     except KeyboardInterrupt:
         print("\n\n👋 已停止")
+        return True
     except Exception as e:
         print(f"\n❌ 錯誤: {e}")
+        return False
     finally:
         await client.disconnect()
+
+    return True
 
 # ──────────── 主程式 ────────────
 

@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from desktop_platform import is_start_on_login_enabled, set_start_on_login
-from teleshield import authenticate, load_block_log, load_config, listen, save_config
+from teleshield import authenticate, load_config, listen, save_config
 
 
 class SetupWorker(QThread):
@@ -111,19 +111,29 @@ class ListenerWorker(QThread):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._stop_requested = False
+        self._ready = False
+
+    def _on_ready(self) -> None:
+        self._ready = True
+        self.started_ok.emit()
 
     def run(self) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
         self._stop_event = asyncio.Event()
+        self._ready = False
         if self._stop_requested:
             self._stop_event.set()
 
         try:
-            self.started_ok.emit()
-            loop.run_until_complete(listen(self._stop_event))
-            self.stopped.emit("防護已停止")
+            success = loop.run_until_complete(listen(self._stop_event, self._on_ready))
+            if not self._ready:
+                self.stopped.emit("防護未啟動：請先完成 Telegram 登入")
+            elif success:
+                self.stopped.emit("防護已停止")
+            else:
+                self.stopped.emit("防護因連線錯誤停止")
         except Exception as exc:
             self.stopped.emit(f"防護停止：{exc}")
         finally:

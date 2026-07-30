@@ -50,6 +50,7 @@ macOS-arm.dmg
 
 目前是未簽署測試版，macOS 可能顯示「無法驗證開發者」。此階段先用右鍵「打開」允許測試；正式發布再加入 Apple Developer signing 與 notarization。
 
+> 測試版 DMG 目前不內含 Tesseract 執行檔與中文語言資料；文字廣告防護可直接使用，圖片 OCR 需另做 bundled OCR 版本。  
 > DMG 內的 App 仍然是以使用者個人 Telegram 身份執行。請只在自己的電腦使用，並妥善保護 Session。
 
 ---

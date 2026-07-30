@@ -57,23 +57,24 @@ def _set_macos_startup(enabled: bool) -> None:
         "ProcessType": "Interactive",
     }
     path.write_bytes(plistlib.dumps(payload, fmt=plistlib.FMT_XML))
-    subprocess.run(
+    result = subprocess.run(
         ["launchctl", "bootstrap", domain, str(path)],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    if result.returncode != 0:
+        path.unlink(missing_ok=True)
+        raise RuntimeError("macOS launchctl 無法註冊開機啟動項目")
 
 
 def _set_windows_startup(enabled: bool) -> None:
     import winreg
 
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    with winreg.OpenKey(
+    with winreg.CreateKey(
         winreg.HKEY_CURRENT_USER,
         key_path,
-        0,
-        winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
     ) as key:
         if enabled:
             winreg.SetValueEx(

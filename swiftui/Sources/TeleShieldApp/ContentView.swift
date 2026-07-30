@@ -458,7 +458,7 @@ private struct ListManagementView: View {
     }
 
     private func exportList(_ format: String) {
-        guard let url = savePanel(extension: format, name: "\(listType).\(format)") else { return }
+        guard let url = savePanel(fileExtension: format, name: "\(listType).\(format)") else { return }
         Task { await client.exportList(listType, path: url.path, format: format) }
     }
 }
@@ -560,7 +560,7 @@ private struct ReportView: View {
     }
 
     private func exportReport() {
-        guard let url = savePanel(extension: "json", name: "teleShield-report.json") else { return }
+        guard let url = savePanel(fileExtension: "json", name: "teleShield-report.json") else { return }
         Task { await client.exportReport(path: url.path) }
     }
 }
@@ -645,7 +645,7 @@ private struct BlockRecordsView: View {
     }
 
     private func export(_ format: String) {
-        guard let url = savePanel(extension: format, name: "teleShield-blocks.\(format)") else { return }
+        guard let url = savePanel(fileExtension: format, name: "teleShield-blocks.\(format)") else { return }
         Task { await client.exportBlocks(path: url.path, query: query, source: source, format: format) }
     }
 }
@@ -953,9 +953,9 @@ private func openPanel(extensions: [String]) -> URL? {
     return panel.runModal() == .OK ? panel.url : nil
 }
 
-private func savePanel(extension: String, name: String) -> URL? {
+private func savePanel(fileExtension: String, name: String) -> URL? {
     let panel = NSSavePanel()
     panel.nameFieldStringValue = name
-    panel.allowedFileTypes = [extension]
+    panel.allowedFileTypes = [fileExtension]
     return panel.runModal() == .OK ? panel.url : nil
 }

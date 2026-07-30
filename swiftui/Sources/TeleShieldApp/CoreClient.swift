@@ -398,7 +398,7 @@ final class CoreClient: ObservableObject {
 
     func updateScanSettings(_ settings: ScanSettings) async {
         do {
-            var updates: [String: JSONValue] = [
+            let updates: [String: JSONValue] = [
                 "private_dialog_limit": .int(settings.privateDialogLimit),
                 "private_message_limit": .int(settings.privateMessageLimit),
                 "private_days": .int(settings.privateDays),

@@ -73,10 +73,14 @@ def load_config():
     return {}
 
 def save_config(cfg):
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp_file = CONFIG_FILE.with_suffix(".json.tmp")
     tmp_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
     os.replace(tmp_file, CONFIG_FILE)
+    try:
+        CONFIG_FILE.chmod(0o600)
+    except OSError:
+        pass
 
 def load_block_log():
     if BLOCK_LOG.exists():
@@ -84,8 +88,12 @@ def load_block_log():
     return {"blocks": []}
 
 def save_block_log(log):
-    BLOCK_LOG.parent.mkdir(parents=True, exist_ok=True)
+    BLOCK_LOG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     BLOCK_LOG.write_text(json.dumps(log, indent=2, ensure_ascii=False))
+    try:
+        BLOCK_LOG.chmod(0o600)
+    except OSError:
+        pass
 
 def load_learned_patterns():
     f = SESSION_DIR / "learned_patterns.json"
@@ -94,7 +102,7 @@ def load_learned_patterns():
     return {"keywords": [], "patterns": []}
 
 def save_learned_patterns(data):
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     (SESSION_DIR / "learned_patterns.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 def is_spam(text: str, cfg: dict = None) -> bool:
@@ -342,7 +350,7 @@ async def authenticate(
     from telethon import TelegramClient
     from telethon.errors import SessionPasswordNeededError
 
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     client = TelegramClient(str(SESSION_FILE), int(api_id), api_hash)
 
     try:

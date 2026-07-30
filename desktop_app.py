@@ -57,6 +57,7 @@ from teleshield import (
     export_block_records,
     export_list_entries,
     get_active_account_id,
+    get_auto_start_account_id,
     get_block_records,
     get_learned_patterns,
     get_ocr_status,
@@ -74,6 +75,7 @@ from teleshield import (
     save_config,
     scan_history,
     set_active_account,
+    set_auto_start_account,
     set_managed_group_enabled,
     update_scan_settings,
     upsert_list_entry,
@@ -98,6 +100,7 @@ class SetupWorker(QThread):
         self._password_event = threading.Event()
         self._code: Optional[str] = None
         self._password: Optional[str] = None
+        self.result_success: Optional[bool] = None
 
     def provide_code(self, value: str) -> None:
         self._code = value.strip()
@@ -137,8 +140,10 @@ class SetupWorker(QThread):
                 )
             )
             username = f"@{me.username}" if me.username else "無 username"
+            self.result_success = True
             self.completed.emit(True, f"登入成功：{me.first_name or ''} ({username})")
         except Exception as exc:  # surfaced in the setup dialog
+            self.result_success = False
             self.completed.emit(False, str(exc))
 
 
@@ -263,6 +268,9 @@ class SetupDialog(QDialog):
         self.account_id = account_id
         self.temporary_account = temporary_account
         self._login_succeeded = False
+        self._deferred_reject = False
+        self._deferred_accept = False
+        self._cleanup_connected = False
         self.setWindowTitle("TeleShield Telegram 登入")
         self.setModal(True)
         self.resize(520, 230)
@@ -306,6 +314,10 @@ class SetupDialog(QDialog):
             return
 
         self.buttons.setEnabled(False)
+        self._cleanup_connected = False
+        self._deferred_reject = False
+        self._deferred_accept = False
+        self._login_succeeded = False
         self.worker = SetupWorker(
             self.api_id.text().strip(),
             self.api_hash.text().strip(),
@@ -360,23 +372,68 @@ class SetupDialog(QDialog):
         elif self.worker:
             self.worker.cancel_prompt()
 
+    def _remove_temporary_account_when_safe(self) -> bool:
+        if not self.temporary_account or not self.account_id or self._login_succeeded:
+            return True
+        if self.worker and self.worker.isRunning():
+            if not self._cleanup_connected:
+                self._cleanup_connected = True
+                self.worker.finished.connect(self._worker_finished_cleanup)
+            return False
+        if not remove_account(self.account_id):
+            QMessageBox.warning(self, "清理失敗", "登入失敗，但臨時帳號資料未能完整移除；請稍後從帳號管理中刪除。")
+        return True
+
+    def _worker_finished_cleanup(self) -> None:
+        if self.worker and self.worker.result_success is True:
+            self._login_succeeded = True
+            if self._deferred_accept:
+                self._deferred_accept = False
+                super().accept()
+            elif self._deferred_reject:
+                self._deferred_reject = False
+                super().reject()
+            else:
+                self.buttons.setEnabled(True)
+            return
+        if self._remove_temporary_account_when_safe():
+            self.buttons.setEnabled(True)
+            if self._deferred_reject:
+                super().reject()
+
     def login_completed(self, success: bool, message: str) -> None:
-        self.buttons.setEnabled(True)
+        worker_running = bool(self.worker and self.worker.isRunning())
+        self.buttons.setEnabled(not worker_running)
         if success:
             self._login_succeeded = True
             QMessageBox.information(self, "登入完成", message)
-            self.accept()
+            if self.worker and self.worker.isRunning():
+                self._deferred_accept = True
+                if not self._cleanup_connected:
+                    self._cleanup_connected = True
+                    self.worker.finished.connect(self._worker_finished_cleanup)
+            else:
+                self.accept()
         else:
-            if self.temporary_account and self.account_id:
-                remove_account(self.account_id)
+            self._remove_temporary_account_when_safe()
             QMessageBox.critical(self, "登入失敗", message)
+            if self._deferred_reject and not (self.worker and self.worker.isRunning()):
+                super().reject()
 
     def reject(self) -> None:
         if self.worker and self.worker.isRunning():
             self.worker.cancel_prompt()
-            self.worker.wait(2000)
-        if self.temporary_account and self.account_id and not self._login_succeeded:
-            remove_account(self.account_id)
+            self._deferred_reject = True
+            if not self.worker.wait(2000):
+                if not self._cleanup_connected:
+                    self._cleanup_connected = True
+                    self.worker.finished.connect(self._worker_finished_cleanup)
+                QMessageBox.warning(self, "登入仍在停止", "登入工作尚未完全停止；視窗會在安全清理後關閉。")
+                return
+        if self.worker and self.worker.result_success is True:
+            self._login_succeeded = True
+        if not self._remove_temporary_account_when_safe():
+            return
         super().reject()
 
 
@@ -630,6 +687,55 @@ class ManagementDialog(QDialog):
         self.tabs.addTab(self._settings_tab(), "掃描／OCR／帳號")
         layout = QVBoxLayout(self)
         layout.addWidget(self.tabs)
+
+    def _workers_running(self) -> bool:
+        return any(
+            worker is not None and worker.isRunning()
+            for worker in (self.group_worker, self.logout_worker)
+        )
+
+    def _operation_available(self) -> bool:
+        if not self._workers_running():
+            return True
+        QMessageBox.warning(
+            self,
+            "操作仍在進行",
+            "同一個 Telegram 帳號一次只能執行一個背景操作，請等目前操作完成。",
+        )
+        return False
+
+    def _set_network_operation_controls(self, enabled: bool) -> None:
+        enabled = bool(enabled and self.network_enabled)
+        for name in (
+            "discover_groups_button",
+            "logout_button",
+            "clear_session_button",
+            "clear_all_button",
+        ):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(enabled)
+
+    def _close_blocked_by_worker(self) -> bool:
+        if not self._workers_running():
+            return False
+        QMessageBox.warning(
+            self,
+            "操作仍在進行",
+            "Telegram 背景操作尚未完成；請等它結束後再關閉管理中心。",
+        )
+        return True
+
+    def closeEvent(self, event) -> None:
+        if self._close_blocked_by_worker():
+            event.ignore()
+            return
+        event.accept()
+
+    def reject(self) -> None:
+        if self._close_blocked_by_worker():
+            return
+        super().reject()
 
     @staticmethod
     def _stretch_table(table: QTableWidget) -> None:
@@ -1001,9 +1107,9 @@ class ManagementDialog(QDialog):
                 self.group_table.setItem(row, column, QTableWidgetItem(str(value)))
 
     def discover_groups(self) -> None:
-        if self.group_worker and self.group_worker.isRunning():
+        if not self._operation_available():
             return
-        self.discover_groups_button.setEnabled(False)
+        self._set_network_operation_controls(False)
         self.group_hint.setText("正在讀取群組與管理員權限…")
         self.group_worker = AsyncOperationWorker(lambda: discover_managed_groups(self.account_id))
         self.group_worker.completed.connect(self.groups_discovered)
@@ -1011,12 +1117,12 @@ class ManagementDialog(QDialog):
         self.group_worker.start()
 
     def groups_discovered(self, groups: object) -> None:
-        self.discover_groups_button.setEnabled(self.network_enabled)
+        self._set_network_operation_controls(True)
         self.refresh_groups()
         self.group_hint.setText(f"已讀取 {len(groups) if isinstance(groups, list) else 0} 個可管理群組。")
 
     def groups_failed(self, message: str) -> None:
-        self.discover_groups_button.setEnabled(self.network_enabled)
+        self._set_network_operation_controls(True)
         self.group_hint.setText("群組讀取失敗")
         QMessageBox.warning(self, "群組讀取失敗", message)
 
@@ -1071,20 +1177,20 @@ class ManagementDialog(QDialog):
         account_layout.addWidget(QLabel("登出會撤銷 Telegram Session；刪除本機 Session 不會輸出任何驗證碼或密碼。"))
         account_actions = QHBoxLayout()
         self.logout_button = QPushButton("登出 Telegram（保留 API 設定）")
-        clear_session = QPushButton("只刪除本機 Session")
-        clear_all = QPushButton("刪除 Session 與 API 設定")
+        self.clear_session_button = QPushButton("只刪除本機 Session")
+        self.clear_all_button = QPushButton("刪除 Session 與 API 設定")
         self.logout_button.clicked.connect(lambda: self.logout(False))
-        clear_session.clicked.connect(lambda: self.clear_local(False))
-        clear_all.clicked.connect(lambda: self.clear_local(True))
+        self.clear_session_button.clicked.connect(lambda: self.clear_local(False))
+        self.clear_all_button.clicked.connect(lambda: self.clear_local(True))
         account_actions.addWidget(self.logout_button)
-        account_actions.addWidget(clear_session)
-        account_actions.addWidget(clear_all)
+        account_actions.addWidget(self.clear_session_button)
+        account_actions.addWidget(self.clear_all_button)
         account_layout.addLayout(account_actions)
         layout.addWidget(account_box)
         if not self.network_enabled:
             self.logout_button.setEnabled(False)
-            clear_session.setEnabled(False)
-            clear_all.setEnabled(False)
+            self.clear_session_button.setEnabled(False)
+            self.clear_all_button.setEnabled(False)
         layout.addStretch()
         return tab
 
@@ -1104,7 +1210,7 @@ class ManagementDialog(QDialog):
         self.ocr_status_label.setWordWrap(True)
 
     def logout(self, remove_credentials: bool) -> None:
-        if self.logout_worker and self.logout_worker.isRunning():
+        if not self._operation_available():
             return
         answer = QMessageBox.question(
             self,
@@ -1115,22 +1221,24 @@ class ManagementDialog(QDialog):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.logout_button.setEnabled(False)
+        self._set_network_operation_controls(False)
         self.logout_worker = AsyncOperationWorker(lambda: logout_account(remove_credentials, account_id=self.account_id))
         self.logout_worker.completed.connect(self.logout_completed)
         self.logout_worker.failed.connect(self.logout_failed)
         self.logout_worker.start()
 
     def logout_completed(self, logged_out: object) -> None:
-        self.logout_button.setEnabled(False if not self.network_enabled else True)
+        self._set_network_operation_controls(True)
         self.account_changed.emit()
         QMessageBox.information(self, "登出完成", "Telegram Session 已清除；請重新登入以恢復防護。")
 
     def logout_failed(self, message: str) -> None:
-        self.logout_button.setEnabled(self.network_enabled)
+        self._set_network_operation_controls(True)
         QMessageBox.critical(self, "登出失敗", message)
 
     def clear_local(self, remove_credentials: bool) -> None:
+        if not self._operation_available():
+            return
         label = "Session 與 API 設定" if remove_credentials else "本機 Session"
         answer = QMessageBox.question(
             self,
@@ -1141,7 +1249,11 @@ class ManagementDialog(QDialog):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        clear_local_session(remove_credentials=remove_credentials, account_id=self.account_id)
+        try:
+            clear_local_session(remove_credentials=remove_credentials, account_id=self.account_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "刪除失敗", str(exc))
+            return
         self.account_changed.emit()
         QMessageBox.information(self, "已刪除", f"{label}已從本機移除。")
 
@@ -1160,6 +1272,7 @@ class MainWindow(QMainWindow):
         self.listeners: dict[str, ListenerWorker] = {}
         self.active_account_id: Optional[str] = get_active_account_id()
         self._updating_accounts = False
+        self._updating_auto_start = False
         self.setWindowTitle("TeleShield")
         self.resize(720, 540)
 
@@ -1172,9 +1285,7 @@ class MainWindow(QMainWindow):
         self.refresh_timer.timeout.connect(self.refresh_status)
         self.refresh_timer.start(3000)
 
-        cfg = load_config(self.active_account_id)
         self.auto_start_checkbox.setChecked(is_start_on_login_enabled())
-        self.auto_protection_checkbox.setChecked(bool(cfg.get("auto_start_protection")))
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -1285,15 +1396,17 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         self.auto_start_checkbox = QCheckBox("登入系統時自動啟動 TeleShield")
-        self.auto_protection_checkbox = QCheckBox("啟動後自動開始防護")
+        self.auto_start_account_combo = QComboBox()
+        self.auto_start_account_combo.currentIndexChanged.connect(self.update_auto_start_account)
         self.auto_start_checkbox.toggled.connect(self.update_startup)
-        self.auto_protection_checkbox.toggled.connect(self.update_auto_protection)
         layout.addWidget(self.auto_start_checkbox)
-        layout.addWidget(self.auto_protection_checkbox)
+        layout.addWidget(QLabel("啟動後自動開始防護的帳號"))
+        layout.addWidget(self.auto_start_account_combo)
         layout.addWidget(
             QLabel(
-                "關閉主視窗只會縮到系統匣，背景防護不會停止。\n"
-                "要真正停止，請按「停止防護」或從系統匣選擇「結束」。"
+                "可選擇一個已登入帳號在下次啟動時自動開始防護；選擇「不自動啟動」即可停用。\n"
+                "其他帳號仍可在程式內按「全部啟動」或個別啟動。\n"
+                "關閉主視窗只會縮到系統匣，背景防護不會停止。"
             )
         )
         layout.addStretch()
@@ -1379,10 +1492,42 @@ class MainWindow(QMainWindow):
                     self.account_combo.setCurrentIndex(index)
         finally:
             self._updating_accounts = False
+        self.refresh_auto_start_accounts()
         has_account = bool(self.active_account_id)
         self.remove_account_button.setEnabled(has_account)
         self.start_all_button.setEnabled(bool(records))
         self.stop_all_button.setEnabled(bool(self.listeners))
+
+    def refresh_auto_start_accounts(self) -> None:
+        if not hasattr(self, "auto_start_account_combo"):
+            return
+        selected = get_auto_start_account_id()
+        records = list_accounts()
+        self._updating_auto_start = True
+        try:
+            self.auto_start_account_combo.clear()
+            self.auto_start_account_combo.addItem("不自動啟動", None)
+            for record in records:
+                self.auto_start_account_combo.addItem(self._format_account_label(record), record.get("id"))
+            index = self.auto_start_account_combo.findData(selected)
+            self.auto_start_account_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self._updating_auto_start = False
+
+    def update_auto_start_account(self, index: int) -> None:
+        if self._updating_auto_start or index < 0:
+            return
+        account_id = self.auto_start_account_combo.itemData(index)
+        try:
+            set_auto_start_account(str(account_id) if account_id else None)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "自動啟動設定失敗", str(exc))
+            self.refresh_auto_start_accounts()
+            return
+        if account_id:
+            self.log_view.append(f"✅ 下次啟動將自動開始帳號 {account_id} 的防護")
+        else:
+            self.log_view.append("⏹ 已停用啟動時自動防護")
 
     def select_account(self, index: int) -> None:
         if self._updating_accounts or index < 0:
@@ -1395,9 +1540,6 @@ class MainWindow(QMainWindow):
             set_active_account(self.active_account_id)
         except ValueError:
             return
-        self.auto_protection_checkbox.blockSignals(True)
-        self.auto_protection_checkbox.setChecked(bool(load_config(self.active_account_id).get("auto_start_protection")))
-        self.auto_protection_checkbox.blockSignals(False)
         self.log_view.append(f"✅ 已切換管理帳號：{self.account_combo.currentText()}")
         self.refresh_status()
 
@@ -1441,7 +1583,9 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        remove_account(account_id, delete_files=True)
+        if not remove_account(account_id, delete_files=True):
+            QMessageBox.warning(self, "移除失敗", "本機帳號資料未能完整刪除，帳號仍保留在索引中。")
+            return
         self.listeners.pop(account_id, None)
         self.active_account_id = get_active_account_id()
         self.refresh_accounts()
@@ -1524,6 +1668,14 @@ class MainWindow(QMainWindow):
     def open_setup(self) -> None:
         if self.active_account_id:
             account_id = self.active_account_id
+            worker = self.listeners.get(account_id)
+            if worker and worker.isRunning():
+                QMessageBox.information(
+                    self,
+                    "請先停止目前帳號的即時防護",
+                    "重新登入會替換 Telegram Session；請先停止這個帳號的防護，避免兩個 client 同時使用同一個 Session。",
+                )
+                return
             temporary = False
         else:
             record = create_account()
@@ -1650,29 +1802,33 @@ class MainWindow(QMainWindow):
             return
         self.log_view.append(f"{'✅ 已啟用' if enabled else '⏹ 已停用'} 開機自動啟動")
 
-    def update_auto_protection(self, enabled: bool) -> None:
-        if not self.active_account_id:
-            return
-        cfg = load_config(self.active_account_id)
-        cfg["auto_start_protection"] = enabled
-        save_config(cfg, self.active_account_id)
-
     def maybe_auto_start(self) -> None:
-        accounts_to_start = []
-        for record in list_accounts():
-            account_id = str(record.get("id"))
-            cfg = load_config(account_id)
-            if cfg.get("auto_start_protection") and cfg.get("api_id"):
-                accounts_to_start.append(account_id)
-        if accounts_to_start:
-            QTimer.singleShot(250, lambda: self.start_all_protection(only_auto=True))
-        elif self.background_start:
-            self.tray.showMessage(
-                "TeleShield",
-                "已在系統匣啟動；請開啟視窗完成 Telegram 設定。",
-                QSystemTrayIcon.MessageIcon.Information,
-                5000,
-            )
+        account_id = get_auto_start_account_id()
+        if not account_id:
+            if self.background_start:
+                self.tray.showMessage(
+                    "TeleShield",
+                    "已在系統匣啟動；目前沒有設定自動啟動的 Telegram 帳號。",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    5000,
+                )
+            return
+        cfg = load_config(account_id)
+        if not cfg.get("api_id"):
+            self.log_view.append(f"⚠️ 自動啟動帳號 {account_id} 尚未完成登入，已跳過")
+            return
+
+        def start_selected_account() -> None:
+            self.active_account_id = account_id
+            try:
+                set_active_account(account_id)
+            except ValueError:
+                return
+            self.refresh_accounts()
+            self._start_account_protection(account_id)
+            self.refresh_status()
+
+        QTimer.singleShot(250, start_selected_account)
 
     def closeEvent(self, event) -> None:
         if self.allow_close:

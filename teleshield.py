@@ -15,9 +15,11 @@ Telegram 廣告封鎖工具 — TeleShield 完整版
   --group-scan                                 掃描群組並踢除廣告
 """
 
-import asyncio, csv, json, os, random, re, shutil, sys, tempfile, time
+import asyncio, csv, errno, json, os, random, re, shutil, sys, tempfile, threading, time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import wraps
+from inspect import signature
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -59,33 +61,38 @@ class AccountStore:
         config_file: Optional[Path] = None,
         block_log: Optional[Path] = None,
         account_id: Optional[str] = None,
+        data_root: Optional[Path] = None,
     ):
         self.root = Path(root)
         self.account_id = account_id
+        self.data_root = Path(data_root) if data_root is not None else (
+            self.root.parent.parent if account_id else self.root
+        )
         self.session_file = Path(session_file) if session_file is not None else self.root / "user.session"
         self.config_file = Path(config_file or self.root / "config.json")
         self.block_log = Path(block_log or self.root / "block_log.json")
         self.learned_patterns_file = self.root / "learned_patterns.json"
 
     def ensure(self) -> None:
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            self.root.chmod(0o700)
-        except OSError:
-            pass
+        directories = [self.data_root]
+        if self.account_id:
+            directories.append(self.data_root / "accounts")
+        directories.append(self.root)
+        for directory in directories:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory.chmod(0o700)
         for path in (
             self.session_file,
             Path(f"{self.session_file}-journal"),
+            Path(f"{self.session_file}-wal"),
+            Path(f"{self.session_file}-shm"),
             self.config_file,
             self.block_log,
             self.learned_patterns_file,
         ):
             if not path.exists():
                 continue
-            try:
-                path.chmod(0o600)
-            except OSError:
-                pass
+            path.chmod(0o600)
         defaults = (
             (self.config_file, {}),
             (self.block_log, {"blocks": []}),
@@ -94,17 +101,168 @@ class AccountStore:
         for path, data in defaults:
             if path.exists():
                 continue
-            path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-            try:
-                path.chmod(0o600)
-            except OSError:
-                pass
+            _write_private_bytes(
+                path,
+                json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+            )
 
 
 _CURRENT_ACCOUNT_STORE: ContextVar[Optional[AccountStore]] = ContextVar(
     "teleshield_current_account_store",
     default=None,
 )
+_ACCOUNT_REGISTRY_LOCK = threading.RLock()
+_ACCOUNT_REGISTRY_LOCK_STATE = threading.local()
+_ACCOUNT_SESSION_MUTEX_GUARD = threading.Lock()
+_ACCOUNT_SESSION_MUTEXES = {}
+_ACCOUNT_SESSION_LOCK_STATE = threading.local()
+
+
+class AccountSessionBusyError(RuntimeError):
+    """Raised when another operation owns an account's Telegram Session."""
+
+
+def _account_session_mutex(key: str):
+    with _ACCOUNT_SESSION_MUTEX_GUARD:
+        return _ACCOUNT_SESSION_MUTEXES.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _private_file_lock(path: Path, blocking: bool = True):
+    """Hold one cross-platform, owner-only advisory file lock."""
+    path = Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    handle = os.fdopen(fd, "r+b", buffering=0)
+    acquired = False
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle.fileno(), 0o600)
+        else:
+            path.chmod(0o600)
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+            handle.seek(0)
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+            msvcrt.locking(handle.fileno(), mode, 1)
+        else:
+            import fcntl
+
+            flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), flags)
+        acquired = True
+        yield
+    finally:
+        try:
+            if acquired:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+@contextmanager
+def _account_registry_transaction(root: Optional[Path] = None):
+    """Serialize a complete registry read/check/write transaction across processes."""
+    root_path = _account_data_root(root)
+    key = str(root_path.resolve())
+    with _ACCOUNT_REGISTRY_LOCK:
+        held = getattr(_ACCOUNT_REGISTRY_LOCK_STATE, "held", None)
+        if held is None:
+            held = {}
+            _ACCOUNT_REGISTRY_LOCK_STATE.held = held
+        if key in held:
+            held[key] += 1
+            try:
+                yield
+            finally:
+                held[key] -= 1
+            return
+        with _private_file_lock(root_path / ".accounts.lock"):
+            held[key] = 1
+            try:
+                yield
+            finally:
+                held.pop(key, None)
+
+
+@contextmanager
+def _account_session_lease(
+    account_id: Optional[str] = None,
+    store: Optional[AccountStore] = None,
+    blocking: bool = False,
+):
+    """Exclusively lease one account's Session across threads and processes."""
+    target = store or _resolve_account_store(account_id)
+    target.ensure()
+    key = str(target.root.resolve())
+    mutex = _account_session_mutex(key)
+    if not mutex.acquire(blocking=blocking):
+        raise AccountSessionBusyError("此 Telegram 帳號正在使用中，請先停止其他操作")
+    depths = getattr(_ACCOUNT_SESSION_LOCK_STATE, "depths", None)
+    if depths is None:
+        depths = {}
+        _ACCOUNT_SESSION_LOCK_STATE.depths = depths
+    try:
+        if key in depths:
+            depths[key] += 1
+            try:
+                yield target
+            finally:
+                depths[key] -= 1
+            return
+        try:
+            lock_id = _validate_account_id(target.account_id) if target.account_id else "legacy"
+            lock_path = target.data_root / ".session-locks" / f"{lock_id}.lock"
+            with _private_file_lock(lock_path, blocking=blocking):
+                depths[key] = 1
+                try:
+                    yield target
+                finally:
+                    depths.pop(key, None)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise AccountSessionBusyError("此 Telegram 帳號正在使用中，請先停止其他操作") from exc
+            raise
+    finally:
+        mutex.release()
+
+
+def _session_leased(function):
+    """Wrap an async Telegram operation in one account context and Session lease."""
+    function_signature = signature(function)
+
+    @wraps(function)
+    async def leased(*args, **kwargs):
+        arguments = function_signature.bind_partial(*args, **kwargs).arguments
+        with account_context(arguments.get("account_id")) as store:
+            with _account_session_lease(store=store):
+                return await function(*args, **kwargs)
+
+    return leased
+
+
+def _registry_locked(function):
+    function_signature = signature(function)
+
+    @wraps(function)
+    def locked(*args, **kwargs):
+        arguments = function_signature.bind_partial(*args, **kwargs).arguments
+        with _account_registry_transaction(arguments.get("root")):
+            return function(*args, **kwargs)
+    return locked
 
 
 def _account_data_root(root: Optional[Path] = None) -> Path:
@@ -116,9 +274,16 @@ def _account_registry_path(root: Optional[Path] = None) -> Path:
 
 
 def _empty_account_registry() -> dict:
-    return {"version": 1, "active_account_id": None, "accounts": []}
+    return {
+        "version": 1,
+        "active_account_id": None,
+        "auto_start_account_id": None,
+        "auto_start_account_configured": False,
+        "accounts": [],
+    }
 
 
+@_registry_locked
 def _read_account_registry(root: Optional[Path] = None) -> dict:
     path = _account_registry_path(root)
     if not path.exists():
@@ -135,20 +300,62 @@ def _read_account_registry(root: Optional[Path] = None) -> dict:
     return {
         "version": int(data.get("version", 1)),
         "active_account_id": data.get("active_account_id"),
+        "auto_start_account_id": data.get("auto_start_account_id"),
+        "auto_start_account_configured": bool(
+            data.get("auto_start_account_configured", "auto_start_account_id" in data)
+        ),
         "accounts": [dict(item) for item in accounts if isinstance(item, dict)],
     }
 
 
+@_registry_locked
 def _write_account_registry(data: dict, root: Optional[Path] = None) -> None:
     path = _account_registry_path(root)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp_file = path.with_suffix(".json.tmp")
-    tmp_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_file, path)
+    path.parent.chmod(0o700)
+    tmp_file = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
     try:
+        tmp_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_file.chmod(0o600)
+        os.replace(tmp_file, path)
         path.chmod(0o600)
-    except OSError:
-        pass
+    finally:
+        try:
+            tmp_file.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _write_private_bytes(path: Path, data: bytes) -> None:
+    """Atomically replace one owner-only file without a permissive creation window."""
+    path = Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.restore-{uuid4().hex}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _restore_private_file(path: Path, snapshot: Optional[bytes]) -> None:
+    if snapshot is None:
+        try:
+            Path(path).unlink()
+        except FileNotFoundError:
+            pass
+        return
+    _write_private_bytes(Path(path), snapshot)
 
 
 def _validate_account_id(account_id: str) -> str:
@@ -160,11 +367,12 @@ def _validate_account_id(account_id: str) -> str:
 
 def account_store(account_id: str, root: Optional[Path] = None) -> AccountStore:
     account_id = _validate_account_id(account_id)
-    return AccountStore(_account_data_root(root) / "accounts" / account_id, account_id=account_id)
+    data_root = _account_data_root(root)
+    return AccountStore(data_root / "accounts" / account_id, account_id=account_id, data_root=data_root)
 
 
 def _legacy_account_store() -> AccountStore:
-    return AccountStore(SESSION_DIR, SESSION_FILE, CONFIG_FILE, BLOCK_LOG)
+    return AccountStore(SESSION_DIR, SESSION_FILE, CONFIG_FILE, BLOCK_LOG, data_root=SESSION_DIR)
 
 
 def _resolve_account_store(account_id: Optional[str] = None) -> AccountStore:
@@ -197,15 +405,18 @@ def _mask_phone(phone: str) -> str:
     return f"{phone[:3]}{'*' * max(1, len(phone) - 5)}{phone[-2:]}"
 
 
+@_registry_locked
 def list_accounts(root: Optional[Path] = None) -> list:
     return list(_read_account_registry(root).get("accounts", []))
 
 
+@_registry_locked
 def get_account(account_id: str, root: Optional[Path] = None) -> Optional[dict]:
     account_id = _validate_account_id(account_id)
     return next((record for record in list_accounts(root) if str(record.get("id")) == account_id), None)
 
 
+@_registry_locked
 def get_active_account_id(root: Optional[Path] = None) -> Optional[str]:
     registry = _read_account_registry(root)
     active = registry.get("active_account_id")
@@ -216,15 +427,18 @@ def get_active_account_id(root: Optional[Path] = None) -> Optional[str]:
     return None
 
 
+@_registry_locked
 def create_account(account_id: Optional[str] = None, root: Optional[Path] = None, metadata: Optional[dict] = None) -> dict:
     root_path = _account_data_root(root)
     registry = _read_account_registry(root_path)
     account_id = _validate_account_id(account_id or f"account-{uuid4().hex[:12]}")
-    store = account_store(account_id, root_path)
-    store.ensure()
     existing = next((item for item in registry["accounts"] if str(item.get("id")) == account_id), None)
     if existing is not None:
+        account_store(account_id, root_path).ensure()
         return dict(existing)
+    _assert_unique_account_identity(account_id, (metadata or {}).get("user_id"), root_path)
+    store = account_store(account_id, root_path)
+    store.ensure()
     now = datetime.now(timezone.utc).isoformat()
     record = {
         "id": account_id,
@@ -247,6 +461,7 @@ def create_account(account_id: Optional[str] = None, root: Optional[Path] = None
     return dict(record)
 
 
+@_registry_locked
 def set_active_account(account_id: str, root: Optional[Path] = None) -> dict:
     root_path = _account_data_root(root)
     registry = _read_account_registry(root_path)
@@ -260,6 +475,61 @@ def set_active_account(account_id: str, root: Optional[Path] = None) -> dict:
     return dict(record)
 
 
+def _config_requests_legacy_auto_start(account_id: str) -> bool:
+    try:
+        return bool(load_config(account_id).get("auto_start_protection"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+@_registry_locked
+def get_auto_start_account_id(root: Optional[Path] = None) -> Optional[str]:
+    """Return the one account selected for automatic protection at app startup."""
+    registry = _read_account_registry(root)
+    account_ids = {str(item.get("id")) for item in registry.get("accounts", []) if item.get("id")}
+    selected = registry.get("auto_start_account_id")
+    if registry.get("auto_start_account_configured"):
+        if selected:
+            try:
+                selected = _validate_account_id(str(selected))
+            except ValueError:
+                return None
+            if selected in account_ids:
+                return selected
+        return None
+    # Backward compatibility for registries created before the global selector.
+    legacy = []
+    for item in registry.get("accounts", []):
+        raw_id = item.get("id")
+        if not raw_id:
+            continue
+        try:
+            candidate_id = _validate_account_id(str(raw_id))
+        except ValueError:
+            continue
+        if item.get("auto_start_protection") or _config_requests_legacy_auto_start(candidate_id):
+            legacy.append(candidate_id)
+    active = str(registry.get("active_account_id")) if registry.get("active_account_id") else ""
+    if active in legacy:
+        return active
+    return legacy[0] if legacy else None
+
+
+@_registry_locked
+def set_auto_start_account(account_id: Optional[str], root: Optional[Path] = None) -> Optional[str]:
+    """Persist the single account whose protection should start with the app."""
+    root_path = _account_data_root(root)
+    registry = _read_account_registry(root_path)
+    selected = None if account_id in (None, "") else _validate_account_id(str(account_id))
+    if selected and not any(str(item.get("id")) == selected for item in registry["accounts"]):
+        raise ValueError("找不到指定 Telegram 帳號")
+    registry["auto_start_account_id"] = selected
+    registry["auto_start_account_configured"] = True
+    _write_account_registry(registry, root_path)
+    return selected
+
+
+@_registry_locked
 def _assert_unique_account_identity(account_id: str, user_id, root: Optional[Path] = None) -> None:
     if user_id is None:
         return
@@ -272,6 +542,7 @@ def _assert_unique_account_identity(account_id: str, user_id, root: Optional[Pat
             raise ValueError("這個 Telegram 帳號已經存在，不能建立第二個共用 Session")
 
 
+@_registry_locked
 def update_account_identity(account_id: str, me, phone: str = "", root: Optional[Path] = None) -> dict:
     root_path = _account_data_root(root)
     account_id = _validate_account_id(account_id)
@@ -294,6 +565,48 @@ def update_account_identity(account_id: str, me, phone: str = "", root: Optional
     return dict(record)
 
 
+@_registry_locked
+def _commit_account_identity_and_config(
+    account_id: str,
+    me,
+    phone: str,
+    cfg: dict,
+    root: Optional[Path] = None,
+) -> dict:
+    """Commit identity metadata and config as one rollback-capable registry transaction."""
+    root_path = _account_data_root(root)
+    account_id = _validate_account_id(account_id)
+    store = account_store(account_id, root_path)
+    store.ensure()
+    registry_path = _account_registry_path(root_path)
+    registry_snapshot = registry_path.read_bytes() if registry_path.exists() else None
+    config_snapshot = store.config_file.read_bytes() if store.config_file.exists() else None
+    try:
+        _assert_unique_account_identity(account_id, getattr(me, "id", None), root_path)
+        with account_context(store=store):
+            save_config(cfg)
+        registry = _read_account_registry(root_path)
+        record = next((item for item in registry["accounts"] if str(item.get("id")) == account_id), None)
+        if record is None:
+            raise ValueError("找不到指定 Telegram 帳號")
+        record.update({
+            "user_id": getattr(me, "id", None),
+            "username": getattr(me, "username", None) or "",
+            "display_name": " ".join(
+                filter(None, [getattr(me, "first_name", ""), getattr(me, "last_name", "")])
+            ).strip(),
+            "phone_masked": _mask_phone(phone),
+            "last_used_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _write_account_registry(registry, root_path)
+        return dict(record)
+    except Exception:
+        _restore_private_file(store.config_file, config_snapshot)
+        _restore_private_file(registry_path, registry_snapshot)
+        raise
+
+
+@_registry_locked
 def remove_account(account_id: str, delete_files: bool = True, root: Optional[Path] = None) -> bool:
     root_path = _account_data_root(root)
     account_id = _validate_account_id(account_id)
@@ -302,29 +615,164 @@ def remove_account(account_id: str, delete_files: bool = True, root: Optional[Pa
     registry["accounts"] = [item for item in registry["accounts"] if str(item.get("id")) != account_id]
     if len(registry["accounts"]) == before:
         return False
-    if registry.get("active_account_id") == account_id:
-        registry["active_account_id"] = registry["accounts"][0]["id"] if registry["accounts"] else None
-    _write_account_registry(registry, root_path)
+
+    def commit_registry_removal() -> None:
+        if registry.get("active_account_id") == account_id:
+            registry["active_account_id"] = registry["accounts"][0]["id"] if registry["accounts"] else None
+        if registry.get("auto_start_account_id") == account_id:
+            registry["auto_start_account_id"] = None
+        _write_account_registry(registry, root_path)
+
     if delete_files:
-        shutil.rmtree(account_store(account_id, root_path).root, ignore_errors=True)
+        store = account_store(account_id, root_path)
+        with _account_session_lease(store=store, blocking=False):
+            account_root = store.root
+            if account_root.exists():
+                try:
+                    shutil.rmtree(account_root, ignore_errors=False)
+                except OSError:
+                    return False
+                if account_root.exists():
+                    return False
+            commit_registry_removal()
+    else:
+        commit_registry_removal()
     return True
 
 
+@_registry_locked
+def _migrate_files_transactionally(
+    sources,
+    destinations,
+    registry: dict,
+    root: Path,
+    target_root: Path,
+    target_existed: bool,
+) -> None:
+    """Commit migrated files, hidden legacy sources, and registry as one transaction."""
+    staged = []
+    committed = []
+    hidden_sources = []
+    registry_path = _account_registry_path(root)
+    registry_snapshot = registry_path.read_bytes() if registry_path.exists() else None
+    try:
+        for source, destination in zip(sources, destinations):
+            if not source.exists():
+                continue
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            destination.parent.chmod(0o700)
+            temporary = destination.with_name(f".{destination.name}.migrate-{uuid4().hex}")
+            shutil.copy2(source, temporary)
+            temporary.chmod(0o600)
+            staged.append((source, temporary, destination))
+
+        for _, temporary, destination in staged:
+            backup = None
+            if destination.exists():
+                backup = destination.with_name(f".{destination.name}.backup-{uuid4().hex}")
+                os.replace(destination, backup)
+                backup.chmod(0o600)
+            committed.append((destination, backup))
+            os.replace(temporary, destination)
+            destination.chmod(0o600)
+
+        for source, _, _ in staged:
+            tombstone = source.with_name(f".{source.name}.migrated-{uuid4().hex}")
+            os.replace(source, tombstone)
+            tombstone.chmod(0o600)
+            hidden_sources.append((source, tombstone))
+
+        _write_account_registry(registry, root)
+    except Exception as exc:
+        rollback_errors = []
+        try:
+            _restore_private_file(registry_path, registry_snapshot)
+        except Exception as rollback_exc:
+            rollback_errors.append(rollback_exc)
+        for source, tombstone in reversed(hidden_sources):
+            try:
+                if tombstone.exists():
+                    os.replace(tombstone, source)
+                    source.chmod(0o600)
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+        for destination, backup in reversed(committed):
+            try:
+                if destination.exists():
+                    destination.unlink()
+                if backup is not None and backup.exists():
+                    os.replace(backup, destination)
+                    destination.chmod(0o600)
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+        for _, temporary, _ in staged:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+        if not target_existed and target_root.exists():
+            try:
+                shutil.rmtree(target_root, ignore_errors=False)
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+        if rollback_errors:
+            raise RuntimeError(
+                f"舊版資料遷移失敗且 rollback 不完整：{rollback_errors[0]}"
+            ) from exc
+        raise RuntimeError(f"舊版資料遷移失敗：{exc}") from exc
+
+    cleanup_errors = []
+    for _, tombstone in hidden_sources:
+        try:
+            tombstone.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as cleanup_exc:
+            cleanup_errors.append(cleanup_exc)
+    for _, backup in committed:
+        if backup is None:
+            continue
+        try:
+            backup.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as cleanup_exc:
+            cleanup_errors.append(cleanup_exc)
+    if cleanup_errors:
+        raise RuntimeError(f"舊版資料已遷移，但敏感暫存檔清理失敗：{cleanup_errors[0]}")
+
+
+@_registry_locked
 def ensure_account_registry(root: Optional[Path] = None) -> list:
     """Create the account registry and migrate the old single-account layout once."""
     root_path = _account_data_root(root)
     registry = _read_account_registry(root_path)
-    if registry["accounts"]:
-        return list(registry["accounts"])
-
+    for directory in (root_path, root_path / "accounts"):
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.chmod(0o700)
+    for item in registry["accounts"]:
+        raw_id = item.get("id")
+        if raw_id:
+            account_store(str(raw_id), root_path).ensure()
     legacy = _legacy_account_store() if root is None else AccountStore(
         root_path,
         root_path / "user.session",
         root_path / "config.json",
         root_path / "block_log.json",
+        data_root=root_path,
     )
-    sources = [legacy.session_file, Path(f"{legacy.session_file}-journal"), legacy.config_file, legacy.block_log, legacy.learned_patterns_file]
+    sources = [
+        legacy.session_file,
+        Path(f"{legacy.session_file}-journal"),
+        legacy.config_file,
+        legacy.block_log,
+        legacy.learned_patterns_file,
+    ]
     if not any(path.exists() for path in sources):
+        if registry["accounts"]:
+            return list(registry["accounts"])
         _write_account_registry(registry, root_path)
         return []
 
@@ -335,39 +783,65 @@ def ensure_account_registry(root: Optional[Path] = None) -> list:
         except (OSError, json.JSONDecodeError):
             legacy_cfg = {}
     user_id = legacy_cfg.get("user_id")
-    account_id = f"user-{user_id}" if str(user_id or "").lstrip("-").isdigit() else f"account-{uuid4().hex[:12]}"
-    record = create_account(
-        account_id,
-        root_path,
-        {
+    derived_account_id = f"user-{user_id}" if str(user_id or "").lstrip("-").isdigit() else ""
+    existing_record = next(
+        (
+            item for item in registry["accounts"]
+            if (derived_account_id and str(item.get("id")) == derived_account_id)
+            or (user_id is not None and str(item.get("user_id")) == str(user_id))
+        ),
+        None,
+    )
+    if existing_record is None and user_id is None and len(registry["accounts"]) == 1:
+        existing_record = registry["accounts"][0]
+    account_id = str(existing_record["id"]) if existing_record else (
+        derived_account_id or f"account-{uuid4().hex[:12]}"
+    )
+    if any(str(item.get("id")) == account_id for item in registry["accounts"]) and not existing_record:
+        account_id = f"account-{uuid4().hex[:12]}"
+    target = account_store(account_id, root_path)
+    target_existed = target.root.exists()
+    target.ensure()
+    target_files = [
+        target.session_file,
+        Path(f"{target.session_file}-journal"),
+        target.config_file,
+        target.block_log,
+        target.learned_patterns_file,
+    ]
+    next_registry = {
+        **registry,
+        "accounts": [dict(item) for item in registry["accounts"]],
+    }
+    if existing_record is not None:
+        record = next(
+            item for item in next_registry["accounts"]
+            if str(item.get("id")) == account_id
+        )
+    else:
+        _assert_unique_account_identity(account_id, user_id, root_path)
+        now = datetime.now(timezone.utc).isoformat()
+        record = {
+            "id": account_id,
             "user_id": user_id,
             "username": legacy_cfg.get("username", "") or "",
             "display_name": legacy_cfg.get("display_name", "") or "",
             "phone_masked": _mask_phone(legacy_cfg.get("phone", "")),
+            "created_at": now,
+            "last_used_at": now,
             "auto_start_protection": bool(legacy_cfg.get("auto_start_protection", False)),
-        },
+        }
+        next_registry["accounts"].append(record)
+    next_registry["active_account_id"] = record["id"]
+    _migrate_files_transactionally(
+        sources,
+        target_files,
+        next_registry,
+        root_path,
+        target.root,
+        target_existed,
     )
-    target = account_store(account_id, root_path)
-    target.ensure()
-    target_files = [target.session_file, Path(f"{target.session_file}-journal"), target.config_file, target.block_log, target.learned_patterns_file]
-    copied = []
-    for source, destination in zip(sources, target_files):
-        if source.exists():
-            shutil.copy2(source, destination)
-            try:
-                destination.chmod(0o600)
-            except OSError:
-                pass
-            copied.append(source)
-    for source in copied:
-        try:
-            source.unlink()
-        except OSError:
-            pass
-    registry = _read_account_registry(root_path)
-    registry["active_account_id"] = record["id"]
-    _write_account_registry(registry, root_path)
-    return list(registry["accounts"])
+    return list(next_registry["accounts"])
 SPAM_PATTERNS = [
     # 中文廣告常見模式
     r"加[\s\-]*[LlvVXx]|[LlvVXx][\s\-]*信",
@@ -418,13 +892,10 @@ def load_config(account_id: Optional[str] = None):
 def save_config(cfg, account_id: Optional[str] = None):
     config_file = _resolve_account_store(account_id).config_file
     config_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp_file = config_file.with_suffix(".json.tmp")
-    tmp_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_file, config_file)
-    try:
-        config_file.chmod(0o600)
-    except OSError:
-        pass
+    _write_private_bytes(
+        config_file,
+        json.dumps(cfg, indent=2, ensure_ascii=False).encode("utf-8"),
+    )
 
 def load_block_log(account_id: Optional[str] = None):
     block_log = _resolve_account_store(account_id).block_log
@@ -435,11 +906,10 @@ def load_block_log(account_id: Optional[str] = None):
 def save_block_log(log, account_id: Optional[str] = None):
     block_log = _resolve_account_store(account_id).block_log
     block_log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    block_log.write_text(json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8")
-    try:
-        block_log.chmod(0o600)
-    except OSError:
-        pass
+    _write_private_bytes(
+        block_log,
+        json.dumps(log, indent=2, ensure_ascii=False).encode("utf-8"),
+    )
 
 def load_learned_patterns(account_id: Optional[str] = None):
     f = _resolve_account_store(account_id).learned_patterns_file
@@ -450,11 +920,10 @@ def load_learned_patterns(account_id: Optional[str] = None):
 def save_learned_patterns(data, account_id: Optional[str] = None):
     learned_file = _resolve_account_store(account_id).learned_patterns_file
     learned_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    learned_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    try:
-        learned_file.chmod(0o600)
-    except OSError:
-        pass
+    _write_private_bytes(
+        learned_file,
+        json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+    )
 
 
 def get_learned_patterns(cfg: dict = None, account_id: Optional[str] = None) -> dict:
@@ -664,10 +1133,7 @@ def export_block_records(path: str, query: str = "", source: str = "all", fmt: s
             writer.writerows({key: row.get(key, "") for key in writer.fieldnames} for row in records)
     else:
         output.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
-    try:
-        output.chmod(0o600)
-    except OSError:
-        pass
+    output.chmod(0o600)
     return len(records)
 
 
@@ -730,10 +1196,7 @@ def export_list_entries(path: str, list_type: str, fmt: str = "", account_id: Op
             writer.writerows(rows)
     else:
         output.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
-    try:
-        output.chmod(0o600)
-    except OSError:
-        pass
+    output.chmod(0o600)
     return len(rows)
 
 
@@ -813,27 +1276,29 @@ def is_group_enabled(group_id: str, cfg: dict = None, account_id: Optional[str] 
 def clear_local_session(remove_credentials: bool = False, account_id: Optional[str] = None) -> None:
     """Delete one account's local Telegram session and identity fields only."""
     store = _resolve_account_store(account_id)
-    effective_account_id = account_id or store.account_id
-    for path in (store.session_file, Path(f"{store.session_file}-journal")):
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-    cfg = load_config(account_id)
-    for key in ("phone", "user_id", "username", "last_scan"):
-        cfg.pop(key, None)
-    if remove_credentials:
-        cfg.pop("api_id", None)
-        cfg.pop("api_hash", None)
-    save_config(cfg, account_id)
-    if effective_account_id:
-        root_path = _account_data_root()
-        registry = _read_account_registry(root_path)
-        for record in registry["accounts"]:
-            if str(record.get("id")) == str(effective_account_id):
-                record.update({"user_id": None, "username": "", "display_name": "", "phone_masked": ""})
-                break
-        _write_account_registry(registry, root_path)
+    with _account_session_lease(store=store):
+        effective_account_id = account_id or store.account_id
+        for path in (store.session_file, Path(f"{store.session_file}-journal")):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        cfg = load_config(account_id)
+        for key in ("phone", "user_id", "username", "last_scan"):
+            cfg.pop(key, None)
+        if remove_credentials:
+            cfg.pop("api_id", None)
+            cfg.pop("api_hash", None)
+        save_config(cfg, account_id)
+        if effective_account_id:
+            root_path = store.data_root
+            with _account_registry_transaction(root_path):
+                registry = _read_account_registry(root_path)
+                for record in registry["accounts"]:
+                    if str(record.get("id")) == str(effective_account_id):
+                        record.update({"user_id": None, "username": "", "display_name": "", "phone_masked": ""})
+                        break
+                _write_account_registry(registry, root_path)
 
 
 def find_tesseract() -> Optional[str]:
@@ -873,8 +1338,8 @@ def is_spam(text: str, cfg: dict = None) -> bool:
         if re.search(pattern, text, re.IGNORECASE):
             return True
     # 自訂學習模式
-    if cfg:
-        lp = cfg.get("learned_patterns", {})
+    if cfg is not None:
+        lp = get_learned_patterns(cfg)
         for p in lp.get("patterns", []):
             try:
                 if re.search(p, text, re.IGNORECASE):
@@ -1019,6 +1484,7 @@ async def report(period: str = "day"):
 
 # ──────────── 首次設定 ────────────
 
+@_session_leased
 async def authenticate(
     api_id: str,
     api_hash: str,
@@ -1030,11 +1496,7 @@ async def authenticate(
 ):
     """Authenticate one personal Telegram account in its isolated store."""
     with account_context(account_id):
-        me = await _authenticate(api_id, api_hash, phone, code_callback, password_callback, status_callback)
-        resolved_id = account_id or get_active_account_id()
-        if resolved_id:
-            update_account_identity(resolved_id, me, phone)
-        return me
+        return await _authenticate(api_id, api_hash, phone, code_callback, password_callback, status_callback)
 
 
 async def _authenticate(
@@ -1058,14 +1520,20 @@ async def _authenticate(
             continue
         backup = path.with_name(f".{path.name}.backup-{uuid4().hex}")
         shutil.copy2(path, backup)
-        try:
-            backup.chmod(0o600)
-        except OSError:
-            pass
+        backup.chmod(0o600)
         session_backups[path] = backup
-    restore_session = bool(session_backups)
+    restore_session = True
     client = None
     try:
+        previous_cfg = load_config()
+        previous_phone = str(previous_cfg.get("phone", "") or "").strip()
+        requested_phone = str(phone or "").strip()
+        if previous_phone and requested_phone and previous_phone != requested_phone:
+            for path in session_paths:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
         client = TelegramClient(str(store.session_file), int(api_id), api_hash)
         await client.connect()
         store.ensure()
@@ -1096,8 +1564,6 @@ async def _authenticate(
                 await client.sign_in(password=password_value)
 
         me = await client.get_me()
-        if store.account_id:
-            _assert_unique_account_identity(store.account_id, getattr(me, "id", None))
         cfg = load_config()
         cfg.update({
             "api_id": int(api_id),
@@ -1116,7 +1582,16 @@ async def _authenticate(
         cfg.setdefault("scan_settings", DEFAULT_SCAN_SETTINGS.copy())
         cfg.setdefault("listen_scan_groups", True)
         cfg.setdefault("auto_start_protection", False)
-        save_config(cfg)
+        if store.account_id:
+            _commit_account_identity_and_config(
+                store.account_id,
+                me,
+                phone,
+                cfg,
+                root=store.data_root,
+            )
+        else:
+            save_config(cfg)
         restore_session = False
         return me
     finally:
@@ -1124,28 +1599,33 @@ async def _authenticate(
             if client is not None:
                 await client.disconnect()
         finally:
+            cleanup_failure = None
             if restore_session:
                 for path in session_paths:
                     backup = session_backups.get(path)
                     if backup is not None and backup.exists():
                         shutil.copy2(backup, path)
-                        try:
-                            path.chmod(0o600)
-                        except OSError:
-                            pass
+                        path.chmod(0o600)
                     elif path.exists():
                         try:
                             path.unlink()
-                        except OSError:
-                            pass
+                        except OSError as exc:
+                            try:
+                                _write_private_bytes(path, b"")
+                            except OSError as scrub_exc:
+                                raise RuntimeError("Session 清理失敗，而且無法清空授權資料") from scrub_exc
+                            cleanup_failure = exc
             for backup in session_backups.values():
                 try:
                     backup.unlink()
                 except FileNotFoundError:
                     pass
             store.ensure()
+            if cleanup_failure is not None:
+                raise RuntimeError("Session 清理失敗；授權資料已清空，請手動刪除空檔") from cleanup_failure
 
 
+@_session_leased
 async def discover_managed_groups(account_id: Optional[str] = None) -> list:
     """Fetch groups for one account where it has moderation privileges."""
     with account_context(account_id):
@@ -1157,14 +1637,17 @@ async def _discover_managed_groups() -> list:
     from telethon import TelegramClient
     from telethon.tl.types import Chat, Channel
 
+    store = _resolve_account_store()
+    store.ensure()
     cfg = load_config()
     if not cfg.get("api_id"):
         raise RuntimeError("尚未登入 Telegram")
-    client = TelegramClient(str(_resolve_account_store().session_file), cfg["api_id"], cfg["api_hash"])
+    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
     connected = False
     try:
         await client.connect()
         connected = True
+        store.ensure()
         if not await client.is_user_authorized():
             raise RuntimeError("Telegram Session 已失效，請先重新登入")
         me = await client.get_me()
@@ -1188,10 +1671,14 @@ async def _discover_managed_groups() -> list:
             })
         return merge_managed_groups(groups)
     finally:
-        if connected:
-            await client.disconnect()
+        try:
+            if connected:
+                await client.disconnect()
+        finally:
+            store.ensure()
 
 
+@_session_leased
 async def logout_account(remove_credentials: bool = False, account_id: Optional[str] = None) -> bool:
     """Log out one Telegram session and then clear only that account's identity data."""
     with account_context(account_id):
@@ -1202,22 +1689,28 @@ async def _logout_account(remove_credentials: bool = False) -> bool:
     """Log out the Telegram session and then clear local identity data."""
     from telethon import TelegramClient
 
+    store = _resolve_account_store()
+    store.ensure()
     cfg = load_config()
     if not cfg.get("api_id"):
         clear_local_session(remove_credentials=remove_credentials)
         return False
-    client = TelegramClient(str(_resolve_account_store().session_file), cfg["api_id"], cfg["api_hash"])
+    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
     connected = False
     logged_out = False
     try:
         await client.connect()
         connected = True
+        store.ensure()
         if await client.is_user_authorized():
             await client.log_out()
             logged_out = True
     finally:
-        if connected:
-            await client.disconnect()
+        try:
+            if connected:
+                await client.disconnect()
+        finally:
+            store.ensure()
     clear_local_session(remove_credentials=remove_credentials)
     return logged_out
 
@@ -1260,6 +1753,7 @@ async def setup(api_id: str = None, api_hash: str = None, phone: str = None, cod
 
 # ──────────── 歷史訊息掃描核心 ────────────
 
+@_session_leased
 async def scan_history(
     scope: str = "private",
     dry_run: bool = False,
@@ -1292,6 +1786,8 @@ async def _scan_history(
     if scope not in {"private", "group"}:
         raise ValueError("scope 必須是 private 或 group")
 
+    store = _resolve_account_store()
+    store.ensure()
     cfg = load_config()
     if not cfg.get("api_id"):
         raise RuntimeError("尚未登入 Telegram")
@@ -1323,12 +1819,13 @@ async def _scan_history(
         result["errors"].append(message)
         progress(f"⚠️ {message}")
 
-    client = TelegramClient(str(_resolve_account_store().session_file), cfg["api_id"], cfg["api_hash"])
+    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
     connected = False
     try:
         progress("正在連線 Telegram…")
         await client.connect()
         connected = True
+        store.ensure()
         if not await client.is_user_authorized():
             raise RuntimeError("Telegram Session 已失效，請先重新登入")
         if cancelled():
@@ -1495,18 +1992,24 @@ async def _scan_history(
         save_config(cfg)
         return result
     finally:
-        if connected:
-            await client.disconnect()
+        try:
+            if connected:
+                await client.disconnect()
+        finally:
+            store.ensure()
 
 
 # ──────────── 掃描私訊封鎖 ────────────
 
+@_session_leased
 async def scan_and_block(dry_run: bool = False):
     from telethon import TelegramClient
     from telethon.tl.functions.contacts import BlockRequest
     from telethon.tl.types import User, Message, InputPhoneContact
     from telethon.tl.functions.contacts import GetContactsRequest
 
+    store = _resolve_account_store()
+    store.ensure()
     cfg = load_config()
     if not cfg.get("api_id"):
         print("❌ 尚未設定，請先執行 --setup")
@@ -1515,9 +2018,10 @@ async def scan_and_block(dry_run: bool = False):
     print(f"{'🧪 試運行' if dry_run else '🔍 掃描模式'}")
     print(f"{'─'*40}")
 
-    client = TelegramClient(str(_resolve_account_store().session_file), cfg["api_id"], cfg["api_hash"])
+    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
     try:
         await client.start(phone=cfg["phone"])
+        store.ensure()
 
         contacts = (await client(GetContactsRequest(hash=0))).users
         contact_ids = {c.id for c in contacts}
@@ -1585,13 +2089,17 @@ async def scan_and_block(dry_run: bool = False):
             cfg["blocked_count"] = cfg.get("blocked_count", 0) + blocked
         cfg["last_scan"] = now.isoformat()
         save_config(cfg)
-        await client.disconnect()
     except Exception as e:
         print(f"\n❌ 錯誤: {e}")
-        await client.disconnect()
+    finally:
+        try:
+            await client.disconnect()
+        finally:
+            store.ensure()
 
 # ──────────── 掃描群組踢除 ────────────
 
+@_session_leased
 async def scan_groups(dry_run: bool = False):
     """掃描群組訊息，踢除發廣告的成員"""
     from telethon import TelegramClient
@@ -1600,6 +2108,8 @@ async def scan_groups(dry_run: bool = False):
     from telethon.tl.functions.contacts import GetContactsRequest
     from telethon.errors import UserAdminInvalidError
 
+    store = _resolve_account_store()
+    store.ensure()
     cfg = load_config()
     if not cfg.get("api_id"):
         print("❌ 尚未設定")
@@ -1608,9 +2118,10 @@ async def scan_groups(dry_run: bool = False):
     print(f"{'🧪 試運行' if dry_run else '👥 群組掃描模式'}")
     print(f"{'─'*40}")
 
-    client = TelegramClient(str(_resolve_account_store().session_file), cfg["api_id"], cfg["api_hash"])
+    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
     try:
         await client.start(phone=cfg["phone"])
+        store.ensure()
         me = await client.get_me()
         now = datetime.now(timezone.utc)
         scan_settings = get_scan_settings(cfg)
@@ -1635,7 +2146,6 @@ async def scan_groups(dry_run: bool = False):
 
         if not groups:
             print("⚠️  沒有可管理的群組（需要是管理員）")
-            await client.disconnect()
             return
 
         print(f"👥 管理中的群組: {len(groups)}")
@@ -1710,10 +2220,13 @@ async def scan_groups(dry_run: bool = False):
         if not dry_run and kicked > 0:
             cfg["kicked_count"] = cfg.get("kicked_count", 0) + kicked
         save_config(cfg)
-        await client.disconnect()
     except Exception as e:
         print(f"\n❌ 錯誤: {e}")
-        await client.disconnect()
+    finally:
+        try:
+            await client.disconnect()
+        finally:
+            store.ensure()
 
 # ──────────── 即時監聽（私訊+群組） ────────────
 
@@ -1723,8 +2236,9 @@ async def listen(
     account_id: Optional[str] = None,
 ) -> bool:
     """Run realtime protection for exactly one account."""
-    with account_context(account_id):
-        return await _listen(stop_event, ready_callback)
+    with account_context(account_id) as store:
+        with _account_session_lease(store=store):
+            return await _listen(stop_event, ready_callback)
 
 
 async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=None) -> bool:
@@ -1734,6 +2248,8 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
     from telethon.tl.types import User, Message, Chat, Channel, ChatBannedRights
     from telethon.tl.functions.contacts import GetContactsRequest
 
+    store = _resolve_account_store()
+    store.ensure()
     cfg = load_config()
     if not cfg.get("api_id"):
         print("❌ 尚未設定")
@@ -1745,7 +2261,7 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
     print("    📸 OCR 支援 → 純圖片廣告也辨識")
     print("    按 Ctrl+C 停止\n")
 
-    client = TelegramClient(str(_resolve_account_store().session_file), cfg["api_id"], cfg["api_hash"])
+    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
 
     @client.on(events.NewMessage(incoming=True))
     async def handler(event):
@@ -1882,6 +2398,7 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
         # Do not call ``start(phone=...)`` here: in a windowless packaged app
         # Telethon could fall back to stdin prompts if the Session expires.
         await client.connect()
+        store.ensure()
         if not await client.is_user_authorized():
             print("❌ Telegram Session 已失效，請從桌面 App 重新登入")
             return False
@@ -1913,13 +2430,21 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
         print(f"\n❌ 錯誤: {e}")
         return False
     finally:
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        finally:
+            store.ensure()
 
     return True
 
 # ──────────── 主程式 ────────────
 
 async def main():
+    try:
+        ensure_account_registry()
+    except Exception as exc:
+        print(f"❌ 帳號資料初始化／遷移失敗：{exc}")
+        return
     if len(sys.argv) < 2:
         print("TeleShield — Telegram 廣告封鎖工具")
         print(f"{'─'*35}")

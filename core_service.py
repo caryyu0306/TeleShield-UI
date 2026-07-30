@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 from queue import Empty, Queue
-from pathlib import Path
 import sys
 import threading
 from typing import Any, Callable, TextIO

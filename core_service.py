@@ -16,6 +16,7 @@ import json
 from queue import Empty, Queue
 import sys
 import threading
+from types import SimpleNamespace
 from typing import Any, Callable, TextIO
 from uuid import uuid4
 
@@ -24,6 +25,15 @@ def _load_core() -> Any:
     import teleshield
 
     return teleshield
+
+
+def _load_platform() -> Any:
+    from desktop_platform import is_start_on_login_enabled, set_start_on_login
+
+    return SimpleNamespace(
+        is_start_on_login_enabled=is_start_on_login_enabled,
+        set_start_on_login=set_start_on_login,
+    )
 
 
 class InvalidRequestError(ValueError):
@@ -95,8 +105,10 @@ class CoreService:
         self,
         core: Any | None = None,
         emit_event: Callable[[dict[str, Any]], None] | None = None,
+        platform: Any | None = None,
     ):
         self.core = core or _load_core()
+        self.platform = platform or _load_platform()
         self._event_sink = emit_event
         self._listeners: dict[str, ListenerRuntime] = {}
         self._auth_flows: dict[str, AuthRuntime] = {}
@@ -115,8 +127,13 @@ class CoreService:
         handlers = {
             "get_status": self._get_status,
             "list_accounts": self._list_accounts,
+            "create_account": self._create_account,
+            "remove_account": self._remove_account,
+            "get_account_details": self._get_account_details,
             "select_account": self._select_account,
             "set_auto_start": self._set_auto_start,
+            "get_startup_status": self._get_startup_status,
+            "set_startup": self._set_startup,
             "start_auth": self._start_auth,
             "submit_auth_code": self._submit_auth_code,
             "submit_auth_password": self._submit_auth_password,
@@ -128,9 +145,18 @@ class CoreService:
             "list_entries": self._list_entries,
             "upsert_list_entry": self._upsert_list_entry,
             "remove_list_entry": self._remove_list_entry,
-            "get_block_records": self._get_block_records,
-            "build_report": self._build_report,
+            "import_list": self._import_list,
+            "export_list": self._export_list,
+            "get_learned_patterns": self._get_learned_patterns,
             "learn_text": self._learn_text,
+            "remove_learned_pattern": self._remove_learned_pattern,
+            "get_block_records": self._get_block_records,
+            "export_blocks": self._export_blocks,
+            "build_report": self._build_report,
+            "discover_groups": self._discover_groups,
+            "set_group_enabled": self._set_group_enabled,
+            "logout": self._logout,
+            "clear_session": self._clear_session,
             "get_scan_settings": self._get_scan_settings,
             "update_scan_settings": self._update_scan_settings,
             "start_scan": self._start_scan,
@@ -200,8 +226,11 @@ class CoreService:
     def close(self) -> None:
         with self._lock:
             auth_flows = list(self._auth_flows.values())
+            jobs = list(self._jobs.values())
         for runtime in auth_flows:
             runtime.cancel_event.set()
+        for _thread, cancel_event in jobs:
+            cancel_event.set()
         self._stop_all({})
 
     def _emit_event(self, event: dict[str, Any]) -> None:
@@ -218,6 +247,20 @@ class CoreService:
     @staticmethod
     def _listener_key(account_id: str | None) -> str:
         return account_id or "__legacy__"
+
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"", "0", "false", "no", "off", "null", "none"}:
+                return False
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+        return bool(value)
 
     def _runtime(self, account_id: str | None) -> ListenerRuntime | None:
         return self._listeners.get(self._listener_key(account_id))
@@ -306,6 +349,58 @@ class CoreService:
     def _list_accounts(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         self.core.ensure_account_registry()
         return [self._safe_account_record(record) for record in self.core.list_accounts()]
+
+    def _create_account(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = params.get("account_id")
+        metadata = params.get("metadata")
+        if account_id or metadata:
+            return self.core.create_account(
+                None if account_id in (None, "") else str(account_id),
+                metadata=metadata if isinstance(metadata, dict) else None,
+            )
+        return self.core.create_account()
+
+    def _remove_account(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        if not account_id:
+            raise InvalidRequestError("account_id 不可為空")
+        runtime = self._runtime(account_id)
+        if runtime and runtime.running:
+            raise RuntimeError("請先停止此帳號的即時防護")
+        removed = self.core.remove_account(
+            account_id,
+            delete_files=self._coerce_bool(params.get("delete_files"), True),
+        )
+        self._listeners.pop(self._listener_key(account_id), None)
+        return {"account_id": account_id, "removed": bool(removed)}
+
+    def _get_account_details(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        cfg = self.core.load_config(account_id) or {}
+        auto_start_account_id = None
+        if hasattr(self.core, "get_auto_start_account_id"):
+            auto_start_account_id = self.core.get_auto_start_account_id()
+            auto_start = auto_start_account_id == account_id
+        else:
+            auto_start = bool(cfg.get("auto_start_protection"))
+        return {
+            "account_id": account_id,
+            "logged_in": bool(cfg.get("user_id")),
+            "has_api_credentials": bool(cfg.get("api_id") and cfg.get("api_hash")),
+            "managed_groups": list(cfg.get("managed_groups") or []),
+            "scan_settings": self.core.get_scan_settings(account_id=account_id),
+            "learned_patterns": self.core.get_learned_patterns(account_id=account_id),
+            "auto_start": auto_start,
+            "auto_start_account_id": auto_start_account_id,
+        }
+
+    def _get_startup_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"enabled": bool(self.platform.is_start_on_login_enabled())}
+
+    def _set_startup(self, params: dict[str, Any]) -> dict[str, Any]:
+        enabled = self._coerce_bool(params.get("enabled"))
+        self.platform.set_start_on_login(enabled)
+        return {"enabled": bool(self.platform.is_start_on_login_enabled())}
 
     def _select_account(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = str(params.get("account_id") or "").strip()
@@ -618,6 +713,45 @@ class CoreService:
         )
         return {"removed": bool(removed)}
 
+    def _import_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = str(params.get("path") or "").strip()
+        if not path:
+            raise InvalidRequestError("path 不可為空")
+        count = self.core.import_list_entries(
+            path,
+            str(params.get("list_type") or ""),
+            replace=self._coerce_bool(params.get("replace")),
+            account_id=self._resolve_account_id(params),
+        )
+        return {"count": int(count)}
+
+    def _export_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = str(params.get("path") or "").strip()
+        if not path:
+            raise InvalidRequestError("path 不可為空")
+        count = self.core.export_list_entries(
+            path,
+            str(params.get("list_type") or ""),
+            str(params.get("fmt") or ""),
+            account_id=self._resolve_account_id(params),
+        )
+        return {"count": int(count), "path": path}
+
+    def _get_learned_patterns(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.core.get_learned_patterns(account_id=self._resolve_account_id(params))
+
+    def _remove_learned_pattern(self, params: dict[str, Any]) -> dict[str, Any]:
+        kind = str(params.get("kind") or "")
+        value = str(params.get("value") or "")
+        if not kind or not value:
+            raise InvalidRequestError("kind 與 value 不可為空")
+        removed = self.core.remove_learned_pattern(
+            kind,
+            value,
+            account_id=self._resolve_account_id(params),
+        )
+        return {"removed": bool(removed)}
+
     def _get_block_records(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         return self.core.get_block_records(
             str(params.get("query") or ""),
@@ -625,6 +759,19 @@ class CoreService:
             int(params.get("limit") or 500),
             account_id=self._resolve_account_id(params),
         )
+
+    def _export_blocks(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = str(params.get("path") or "").strip()
+        if not path:
+            raise InvalidRequestError("path 不可為空")
+        count = self.core.export_block_records(
+            path,
+            str(params.get("query") or ""),
+            str(params.get("source") or "all"),
+            str(params.get("fmt") or "json"),
+            account_id=self._resolve_account_id(params),
+        )
+        return {"count": int(count), "path": path}
 
     def _build_report(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.core.build_report(
@@ -650,6 +797,95 @@ class CoreService:
             account_id=self._resolve_account_id(params),
         )
 
+    def _start_async_job(
+        self,
+        operation: Callable[[], Any],
+        event_name: str,
+        account_id: str | None,
+        operation_name: str | None = None,
+    ) -> dict[str, Any]:
+        job_id = uuid4().hex
+        cancel_event = threading.Event()
+
+        def run_job() -> None:
+            try:
+                result = asyncio.run(operation())
+                event = {
+                    "event": event_name,
+                    "job_id": job_id,
+                    "account_id": account_id,
+                    "result": result,
+                }
+                if operation_name:
+                    event["operation"] = operation_name
+                self._emit_event(event)
+            except Exception as exc:
+                event = {
+                    "event": event_name.replace("_finished", "_failed"),
+                    "job_id": job_id,
+                    "account_id": account_id,
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                }
+                if operation_name:
+                    event["operation"] = operation_name
+                self._emit_event(event)
+            finally:
+                with self._lock:
+                    self._jobs.pop(job_id, None)
+
+        thread = threading.Thread(
+            target=run_job,
+            name=f"TeleShieldJob-{job_id[:8]}",
+            daemon=True,
+        )
+        with self._lock:
+            self._jobs[job_id] = (thread, cancel_event)
+        thread.start()
+        return {"job_id": job_id, "account_id": account_id, "running": True}
+
+    def _discover_groups(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        return self._start_async_job(
+            lambda: self.core.discover_managed_groups(account_id=account_id),
+            "groups_finished",
+            account_id,
+        )
+
+    def _set_group_enabled(self, params: dict[str, Any]) -> dict[str, Any]:
+        group_id = str(params.get("group_id") or "").strip()
+        if not group_id:
+            raise InvalidRequestError("group_id 不可為空")
+        updated = self.core.set_managed_group_enabled(
+            group_id,
+            self._coerce_bool(params.get("enabled")),
+            account_id=self._resolve_account_id(params),
+        )
+        return {"updated": bool(updated), "group_id": group_id}
+
+    def _logout(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        runtime = self._runtime(account_id)
+        if runtime and runtime.running:
+            raise RuntimeError("請先停止此帳號的即時防護")
+        remove_credentials = self._coerce_bool(params.get("remove_credentials"))
+        return self._start_async_job(
+            lambda: self.core.logout_account(remove_credentials, account_id=account_id),
+            "account_operation_finished",
+            account_id,
+            operation_name="logout",
+        )
+
+    def _clear_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        runtime = self._runtime(account_id)
+        if runtime and runtime.running:
+            raise RuntimeError("請先停止此帳號的即時防護")
+        self.core.clear_local_session(
+            remove_credentials=self._coerce_bool(params.get("remove_credentials")),
+            account_id=account_id,
+        )
+        return {"account_id": account_id, "cleared": True}
+
     def _start_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
         job_id = uuid4().hex
@@ -669,7 +905,7 @@ class CoreService:
                 result = asyncio.run(
                     self.core.scan_history(
                         scope=str(params.get("scope") or "private"),
-                        dry_run=bool(params.get("dry_run", True)),
+                        dry_run=self._coerce_bool(params.get("dry_run"), True),
                         progress_callback=progress,
                         cancel_event=cancel_event,
                         account_id=account_id,

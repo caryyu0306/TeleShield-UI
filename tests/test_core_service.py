@@ -69,6 +69,7 @@ def test_get_status_exposes_safe_core_summary_and_selected_account():
     assert result["selected_account"]["blacklist_count"] == 1
     assert result["selected_account"]["configured"] is True
     assert result["ocr"]["available"] is False
+    assert "api_hash" not in result["selected_account"]
 
 
 def test_stdio_protocol_returns_json_responses_and_structured_errors():
@@ -157,7 +158,7 @@ class FakeAuthCore(FakeCore):
         assert (api_id, api_hash, phone, code, password, account_id) == (
             "1234",
             "hash",
-            "+10000000000",
+            "+100****0000",
             "2468",
             "secret",
             "account-a",
@@ -174,7 +175,7 @@ def test_auth_flow_round_trips_code_and_two_step_password_without_blocking_stdio
         {
             "api_id": "1234",
             "api_hash": "hash",
-            "phone": "+10000000000",
+            "phone": "+100****0000",
             "account_id": "account-a",
         },
     )
@@ -211,3 +212,155 @@ def test_auth_flow_round_trips_code_and_two_step_password_without_blocking_stdio
     ):
         time.sleep(0.01)
     assert any(event.get("event") == "auth_succeeded" for event in events)
+
+
+class FakePlatform:
+    def __init__(self):
+        self.enabled = False
+
+    def is_start_on_login_enabled(self):
+        return self.enabled
+
+    def set_start_on_login(self, enabled):
+        self.enabled = bool(enabled)
+
+
+class FakeParityCore(FakeCore):
+    def __init__(self):
+        super().__init__()
+        self.startup_enabled = False
+        self.learned = {"keywords": ["spam"], "patterns": ["https://"]}
+        self.groups = [{"id": "-100", "title": "Announcements", "enabled": True}]
+        self.calls = []
+
+    def create_account(self):
+        self.calls.append("create_account")
+        return {"id": "account-b", "display_name": ""}
+
+    def remove_account(self, account_id, delete_files=True):
+        self.calls.append(("remove_account", account_id, delete_files))
+        return True
+
+    def get_learned_patterns(self, account_id=None):
+        return dict(self.learned)
+
+    def remove_learned_pattern(self, kind, value, account_id=None):
+        self.calls.append(("remove_learned_pattern", kind, value))
+        return True
+
+    async def discover_managed_groups(self, account_id=None):
+        self.calls.append(("discover_managed_groups", account_id))
+        return self.groups
+
+    def set_managed_group_enabled(self, group_id, enabled, account_id=None):
+        self.calls.append(("set_managed_group_enabled", str(group_id), enabled))
+        return True
+
+    async def logout_account(self, remove_credentials=False, account_id=None):
+        self.calls.append(("logout_account", remove_credentials, account_id))
+        return True
+
+    def clear_local_session(self, remove_credentials=False, account_id=None):
+        self.calls.append(("clear_local_session", remove_credentials, account_id))
+
+    def get_scan_settings(self, account_id=None):
+        return {"private_dialog_limit": 1}
+
+    def update_scan_settings(self, updates, account_id=None):
+        self.calls.append(("update_scan_settings", updates, account_id))
+        return dict(updates)
+
+    def import_list_entries(self, path, list_type, replace=False, account_id=None):
+        self.calls.append(("import_list_entries", path, list_type, replace, account_id))
+        return 2
+
+    def export_list_entries(self, path, list_type, fmt="", account_id=None):
+        self.calls.append(("export_list_entries", path, list_type, fmt, account_id))
+        return 3
+
+    def export_block_records(self, path, query="", source="all", fmt="json", account_id=None):
+        self.calls.append(("export_block_records", path, query, source, fmt, account_id))
+        return 4
+
+    def get_auto_start_account_id(self):
+        return "account-a"
+
+
+def _wait_for_event(events, name, timeout=2):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for event in events:
+            if event.get("event") == name:
+                return event
+        time.sleep(0.01)
+    raise AssertionError(f"event not emitted: {name}")
+
+
+def test_management_surface_covers_account_rules_groups_exports_and_startup():
+    events = []
+    core = FakeParityCore()
+    service = CoreService(core=core, emit_event=events.append, platform=FakePlatform())
+
+    assert service.dispatch("create_account")["id"] == "account-b"
+    assert service.dispatch("remove_account", {"account_id": "account-b"})["removed"] is True
+    assert service.dispatch("get_learned_patterns")["keywords"] == ["spam"]
+    assert service.dispatch(
+        "remove_learned_pattern", {"kind": "keywords", "value": "spam"}
+    )["removed"] is True
+    assert service.dispatch("set_group_enabled", {"group_id": "-100", "enabled": False})["updated"] is True
+    assert service.dispatch("get_startup_status")["enabled"] is False
+    assert service.dispatch("set_startup", {"enabled": True})["enabled"] is True
+    assert service.dispatch("import_list", {"path": "/tmp/in.json", "list_type": "blacklist"})["count"] == 2
+    assert service.dispatch("export_list", {"path": "/tmp/out.json", "list_type": "blacklist"})["count"] == 3
+    assert service.dispatch("export_blocks", {"path": "/tmp/log.csv", "fmt": "csv"})["count"] == 4
+    assert service.dispatch("get_scan_settings")["private_dialog_limit"] == 1
+    assert service.dispatch("update_scan_settings", {"updates": {"private_dialog_limit": 4}})["private_dialog_limit"] == 4
+
+    group_job = service.dispatch("discover_groups")
+    assert group_job["running"] is True
+    assert _wait_for_event(events, "groups_finished")["result"] == core.groups
+
+    logout_job = service.dispatch("logout", {"remove_credentials": False})
+    assert logout_job["running"] is True
+    assert _wait_for_event(events, "account_operation_finished")["operation"] == "logout"
+
+
+def test_account_details_exposes_global_auto_start_and_omits_credentials():
+    service = CoreService(core=FakeParityCore(), platform=FakePlatform())
+
+    details = service.dispatch("get_account_details", {"account_id": "account-a"})
+
+    assert details["account_id"] == "account-a"
+    assert details["auto_start"] is True
+    assert details["auto_start_account_id"] == "account-a"
+    assert "api_id" not in details
+    assert "api_hash" not in details
+
+
+def test_scan_protocol_preserves_explicit_false_dry_run():
+    class ScanCore(FakeCore):
+        def __init__(self):
+            super().__init__()
+            self.seen_dry_run = None
+
+        async def scan_history(
+            self,
+            scope,
+            dry_run=True,
+            progress_callback=None,
+            cancel_event=None,
+            account_id=None,
+        ):
+            self.seen_dry_run = dry_run
+            if progress_callback:
+                progress_callback("scan started")
+            return {"scope": scope, "dry_run": dry_run, "findings": []}
+
+    events = []
+    core = ScanCore()
+    service = CoreService(core=core, emit_event=events.append)
+    job = service.dispatch("start_scan", {"scope": "private", "dry_run": "false"})
+    assert job["running"] is True
+    result = _wait_for_event(events, "scan_finished")["result"]
+    assert result["dry_run"] is False
+    assert core.seen_dry_run is False

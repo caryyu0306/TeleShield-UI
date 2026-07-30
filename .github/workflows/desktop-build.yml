@@ -64,8 +64,11 @@ jobs:
           --clean
           --windowed
           --name TeleShield
-          --collect-all PySide6
           desktop_app.py
+      - name: Report unpacked app size
+        run: |
+          du -sh "dist/TeleShield.app"
+          du -sh "dist/TeleShield.app/Contents/Frameworks" || true
       - name: Create unsigned DMG
         env:
           ARTIFACT_NAME: ${{ matrix.artifact_name }}

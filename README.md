@@ -32,7 +32,8 @@
 
 本 fork 正在把 TeleShield 包裝成一般使用者可以直接安裝的桌面應用程式：
 
-- PySide6 GUI，不需要使用者執行 CLI
+- 既有跨平台版：PySide6 GUI，不需要使用者執行 CLI
+- macOS 重構版：SwiftUI 原生 UI + 不含 PySide6 的 Python sidecar
 - Telegram 個人帳號登入流程
 - 關閉主視窗只會隱藏到系統匣，背景防護仍然執行
 - 系統匣選單可重新開啟、開始／停止防護或真正結束程式
@@ -55,9 +56,24 @@
 ```text
 macOS-intel.dmg
 macOS-arm.dmg
+macOS-intel-swiftui.dmg
+macOS-arm-swiftui.dmg
 ```
 
-目前是未簽署測試版，macOS 可能顯示「無法驗證開發者」。此階段先用右鍵「打開」允許測試；正式發布再加入 Apple Developer signing 與 notarization。
+`*-swiftui.dmg` 是目前的 macOS 重構切片：SwiftUI 負責原生畫面，`TeleShieldCore` 以 local JSON-RPC sidecar 執行既有 Telethon 核心；目前先完成狀態、帳號列表與即時防護生命週期，登入 wizard、管理中心會逐步接上。
+
+### SwiftUI + Python sidecar 架構
+
+```text
+TeleShield.app (SwiftUI)
+└── Contents/Helpers/TeleShieldCore (PyInstaller, no PySide6)
+    ├── teleshield.py / Telethon
+    └── optional bundled Tesseract runtime
+```
+
+SwiftUI 與 Python helper 使用 line-delimited JSON；Session、設定與封鎖紀錄仍由既有 Python core 管理，放在使用者資料目錄，不寫入 App bundle。
+
+目前兩種 macOS DMG 都是未簽署測試版，macOS 可能顯示「無法驗證開發者」。此階段先用右鍵「打開」允許測試；正式發布再加入 Apple Developer signing 與 notarization。
 
 > Actions 會將 Tesseract、英文與簡體中文語言資料包進 macOS App；管理中心會顯示 OCR runtime 是否可用。
 > DMG 內的 App 仍然是以使用者個人 Telegram 身份執行。請只在自己的電腦使用，並妥善保護 Session。

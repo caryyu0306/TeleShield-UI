@@ -4,7 +4,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from core_service import CoreService
+from core_service import AuthRuntime, CoreService
 
 
 class FakeCore:
@@ -364,3 +364,88 @@ def test_scan_protocol_preserves_explicit_false_dry_run():
     result = _wait_for_event(events, "scan_finished")["result"]
     assert result["dry_run"] is False
     assert core.seen_dry_run is False
+
+
+def test_unexpected_listener_exit_cleans_runtime_thread():
+    class UnexpectedExitCore(FakeCore):
+        async def listen(self, stop_event=None, ready_callback=None, account_id=None):  # type: ignore[override]
+            return False
+
+    events = []
+    service = CoreService(core=UnexpectedExitCore(), emit_event=events.append)
+    service.dispatch("start_protection", {"account_id": "account-a"})
+    runtime = service._listeners["account-a"]
+    _wait_for_event(events, "status")
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and runtime.thread and runtime.thread.is_alive():
+        time.sleep(0.01)
+    try:
+        assert runtime.thread is not None
+        assert runtime.thread.is_alive() is False
+    finally:
+        runtime.stop_event.set()
+        if runtime.thread:
+            runtime.thread.join(timeout=1)
+
+
+def test_auth_error_and_event_log_redact_credentials():
+    class SecretErrorCore(FakeCore):
+        async def authenticate(
+            self,
+            api_id,
+            api_hash,
+            phone,
+            code_callback,
+            password_callback,
+            status_callback=None,
+            account_id=None,
+        ):
+            raise RuntimeError(
+                "api_hash=super-secret-hash password=two-step-pass phone=+15551234567"
+            )
+
+    events = []
+    service = CoreService(core=SecretErrorCore(), emit_event=events.append)
+    service.dispatch(
+        "start_auth",
+        {
+            "api_id": "1234",
+            "api_hash": "super-secret-hash",
+            "phone": "+15551234567",
+            "account_id": "account-a",
+        },
+    )
+    failure = _wait_for_event(events, "auth_failed")
+    serialized = json.dumps(failure, ensure_ascii=False)
+    assert "super-secret-hash" not in serialized
+    assert "two-step-pass" not in serialized
+    assert "+15551234567" not in serialized
+    assert "[REDACTED]" in serialized
+
+
+def test_close_joins_auth_and_job_workers():
+    class SpyThread:
+        def __init__(self):
+            self.join_calls = []
+
+        def is_alive(self):
+            return True
+
+        def join(self, timeout=None):
+            self.join_calls.append(timeout)
+
+    service = CoreService(core=FakeCore())
+    auth_thread = SpyThread()
+    job_thread = SpyThread()
+    auth = service._auth_flows["flow"] = AuthRuntime(  # type: ignore[arg-type]
+        flow_id="flow", account_id="account-a", thread=auth_thread
+    )
+    job_cancel = threading.Event()
+    service._jobs["job"] = (job_thread, job_cancel)  # type: ignore[assignment]
+
+    service.close()
+
+    assert auth.cancel_event.is_set()
+    assert job_cancel.is_set()
+    assert auth_thread.join_calls
+    assert job_thread.join_calls

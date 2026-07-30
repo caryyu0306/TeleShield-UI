@@ -8,11 +8,11 @@ It never imports PySide6, so the frozen helper can be packaged without Qt.
 from __future__ import annotations
 
 import asyncio
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import io
 import json
+import re
 from queue import Empty, Queue
 import sys
 import threading
@@ -44,6 +44,42 @@ class UnknownMethodError(ValueError):
     """The requested service method does not exist."""
 
 
+_REDACTION_PATTERN = re.compile(
+    r"(?i)(\b(?:api[_ -]?hash|password|passwd|secret|token|session(?:[_ -]?string)?|"
+    r"phone(?:[_ -]?number)?|verification[_ -]?code)\b\s*[:=]\s*)"
+    r"([\"']?)([^\"'\s,;}\]]+)"
+)
+
+
+def _redact_text(value: Any, extra_values: Any = ()) -> str:
+    """Remove credential-like values before text reaches RPC or UI events."""
+    text = str(value)
+    secrets = sorted(
+        {
+            str(item)
+            for item in extra_values
+            if item is not None and len(str(item)) >= 3
+        },
+        key=len,
+        reverse=True,
+    )
+    for secret in secrets:
+        text = text.replace(secret, "[REDACTED]")
+    return _REDACTION_PATTERN.sub(r"\1[REDACTED]", text)
+
+
+def _redact_payload(value: Any, extra_values: Any = ()) -> Any:
+    if isinstance(value, dict):
+        return {key: _redact_payload(item, extra_values) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_payload(item, extra_values) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_payload(item, extra_values) for item in value)
+    if isinstance(value, str):
+        return _redact_text(value, extra_values)
+    return value
+
+
 @dataclass
 class ListenerRuntime:
     account_id: str | None
@@ -67,15 +103,17 @@ class AuthRuntime:
     cancel_event: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
     state: str = "starting"
+    sensitive_values: list[str] = field(default_factory=list)
 
 
 class _EventLogWriter(io.TextIOBase):
     """Turn legacy core ``print`` calls into structured service events."""
 
-    def __init__(self, service: "CoreService", level: str):
+    def __init__(self, service: "CoreService", level: str, extra_values: Any = ()):
         super().__init__()
         self.service = service
         self.level = level
+        self.extra_values = extra_values
         self._buffer = ""
 
     def write(self, text: str) -> int:
@@ -94,7 +132,8 @@ class _EventLogWriter(io.TextIOBase):
         message = message.strip()
         if message:
             self.service._emit_event(
-                {"event": "log", "level": self.level, "message": message}
+                {"event": "log", "level": self.level, "message": message},
+                extra_values=self.extra_values,
             )
 
 
@@ -113,6 +152,8 @@ class CoreService:
         self._listeners: dict[str, ListenerRuntime] = {}
         self._auth_flows: dict[str, AuthRuntime] = {}
         self._jobs: dict[str, tuple[threading.Thread, threading.Event]] = {}
+        self._sensitive_values: list[str] = []
+        self._scan_jobs: dict[str, str] = {}
         self._lock = threading.RLock()
         self._shutdown_requested = False
 
@@ -170,6 +211,8 @@ class CoreService:
 
     def handle_request(self, request: Any) -> dict[str, Any]:
         request_id = request.get("id") if isinstance(request, dict) else None
+        request_params = request.get("params") if isinstance(request, dict) else {}
+        extra_values = request_params.values() if isinstance(request_params, dict) else ()
         try:
             if not isinstance(request, dict):
                 raise InvalidRequestError("request 必須是 JSON object")
@@ -183,7 +226,7 @@ class CoreService:
                 "ok": False,
                 "error": {
                     "type": type(exc).__name__,
-                    "message": str(exc),
+                    "message": _redact_text(str(exc), extra_values),
                 },
             }
 
@@ -201,30 +244,39 @@ class CoreService:
         if self._event_sink is None:
             self._event_sink = send
 
-        for raw_line in reader:
-            if not raw_line.strip():
-                continue
-            try:
-                request = json.loads(raw_line)
-            except json.JSONDecodeError as exc:
-                send(
-                    {
-                        "id": None,
-                        "ok": False,
-                        "error": {
-                            "type": "InvalidRequestError",
-                            "message": f"JSON 格式錯誤：{exc.msg}",
-                        },
-                    }
-                )
-                continue
-            send(self.handle_request(request))
-            if self._shutdown_requested:
-                break
-        self.close()
+        previous_stdout, previous_stderr = sys.stdout, sys.stderr
+        sys.stdout = _EventLogWriter(self, "stdout", self._sensitive_values)
+        sys.stderr = _EventLogWriter(self, "stderr", self._sensitive_values)
+        try:
+            for raw_line in reader:
+                if not raw_line.strip():
+                    continue
+                try:
+                    request = json.loads(raw_line)
+                except json.JSONDecodeError as exc:
+                    send(
+                        {
+                            "id": None,
+                            "ok": False,
+                            "error": {
+                                "type": "InvalidRequestError",
+                                "message": f"JSON 格式錯誤：{exc.msg}",
+                            },
+                        }
+                    )
+                    continue
+                send(self.handle_request(request))
+                if self._shutdown_requested:
+                    break
+        finally:
+            self.close()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            sys.stdout, sys.stderr = previous_stdout, previous_stderr
 
     def close(self) -> None:
         with self._lock:
+            self._shutdown_requested = True
             auth_flows = list(self._auth_flows.values())
             jobs = list(self._jobs.values())
         for runtime in auth_flows:
@@ -233,10 +285,33 @@ class CoreService:
             cancel_event.set()
         self._stop_all({})
 
-    def _emit_event(self, event: dict[str, Any]) -> None:
+        current = threading.current_thread()
+        remaining: list[str] = []
+        for runtime in auth_flows:
+            thread = runtime.thread
+            if thread and thread is not current and thread.is_alive():
+                thread.join(timeout=5)
+            if thread and thread.is_alive():
+                remaining.append(f"auth:{runtime.flow_id}")
+        for job_id, (thread, _cancel_event) in list(self._jobs.items()):
+            if thread is not current and thread.is_alive():
+                thread.join(timeout=5)
+            if thread.is_alive():
+                remaining.append(f"job:{job_id}")
+        with self._lock:
+            for flow_id, runtime in list(self._auth_flows.items()):
+                if not runtime.thread or not runtime.thread.is_alive():
+                    self._auth_flows.pop(flow_id, None)
+            for job_id, (thread, _cancel_event) in list(self._jobs.items()):
+                if not thread.is_alive():
+                    self._jobs.pop(job_id, None)
+        if remaining:
+            self._emit_event({"event": "shutdown_incomplete", "workers": remaining})
+
+    def _emit_event(self, event: dict[str, Any], extra_values: Any = ()) -> None:
         sink = self._event_sink
         if sink is not None:
-            sink(dict(event))
+            sink(_redact_payload(event, extra_values))
 
     def _resolve_account_id(self, params: dict[str, Any]) -> str | None:
         value = params.get("account_id")
@@ -424,9 +499,13 @@ class CoreService:
 
         account_id = self._resolve_account_id(params)
         flow_id = uuid4().hex
-        runtime = AuthRuntime(flow_id=flow_id, account_id=account_id)
-
+        runtime = AuthRuntime(
+            flow_id=flow_id,
+            account_id=account_id,
+            sensitive_values=[api_hash, phone],
+        )
         with self._lock:
+            self._sensitive_values.extend([api_hash, phone])
             if any(
                 flow.account_id == account_id
                 and flow.thread
@@ -437,9 +516,6 @@ class CoreService:
             self._auth_flows[flow_id] = runtime
 
         def run_auth() -> None:
-            log_writer = _EventLogWriter(self, "stdout")
-            error_writer = _EventLogWriter(self, "stderr")
-
             async def wait_for_value(value_queue: Queue[str], kind: str) -> str:
                 self._emit_event(
                     {
@@ -473,18 +549,17 @@ class CoreService:
                 )
 
             try:
-                with redirect_stdout(log_writer), redirect_stderr(error_writer):
-                    me = asyncio.run(
-                        self.core.authenticate(
-                            api_id,
-                            api_hash,
-                            phone,
-                            code_callback,
-                            password_callback,
-                            status_callback,
-                            account_id,
-                        )
+                me = asyncio.run(
+                    self.core.authenticate(
+                        api_id,
+                        api_hash,
+                        phone,
+                        code_callback,
+                        password_callback,
+                        status_callback,
+                        account_id,
                     )
+                )
                 runtime.state = "succeeded"
                 self._emit_event(
                     {
@@ -515,12 +590,16 @@ class CoreService:
                             "type": type(exc).__name__,
                             "message": str(exc),
                         },
-                    }
+                    },
+                    extra_values=runtime.sensitive_values,
                 )
             finally:
-                log_writer.flush()
-                error_writer.flush()
                 with self._lock:
+                    for value in runtime.sensitive_values:
+                        try:
+                            self._sensitive_values.remove(value)
+                        except ValueError:
+                            pass
                     self._auth_flows.pop(flow_id, None)
 
         runtime.thread = threading.Thread(
@@ -554,6 +633,9 @@ class CoreService:
         if not value:
             raise InvalidRequestError("登入輸入不可為空")
         runtime = self._auth_flow(params)
+        runtime.sensitive_values.append(value)
+        with self._lock:
+            self._sensitive_values.append(value)
         getattr(runtime, value_queue_name).put_nowait(value)
         return {"flow_id": runtime.flow_id, "accepted": True}
 
@@ -637,14 +719,12 @@ class CoreService:
         )
 
     def _listener_worker(self, runtime: ListenerRuntime) -> None:
-        log_writer = _EventLogWriter(self, "stdout")
-        error_writer = _EventLogWriter(self, "stderr")
-
         async def run_listener() -> bool:
             async_stop = asyncio.Event()
 
             async def watch_stop_request() -> None:
-                await asyncio.to_thread(runtime.stop_event.wait)
+                while not runtime.stop_event.is_set():
+                    await asyncio.sleep(0.05)
                 async_stop.set()
 
             stop_task = asyncio.create_task(watch_stop_request())
@@ -660,9 +740,9 @@ class CoreService:
                     ready_callback=ready_callback,
                     account_id=runtime.account_id,
                 )
-                if not result and runtime.state != "error":
+                if not runtime.stop_event.is_set() and runtime.state != "error":
                     runtime.state = "error"
-                    runtime.error = "核心 listener 未啟動"
+                    runtime.error = "核心 listener 意外結束"
                     self._emit_status(runtime)
                 return bool(result)
             except Exception as exc:
@@ -675,15 +755,12 @@ class CoreService:
                 await asyncio.gather(stop_task, return_exceptions=True)
 
         try:
-            with redirect_stdout(log_writer), redirect_stderr(error_writer):
-                asyncio.run(run_listener())
+            asyncio.run(run_listener())
         except Exception as exc:
             runtime.state = "error"
-            runtime.error = str(exc)
+            runtime.error = _redact_text(str(exc))
             self._emit_status(runtime)
         finally:
-            log_writer.flush()
-            error_writer.flush()
             if runtime.stop_event.is_set() and runtime.state != "error":
                 runtime.state = "stopped"
                 runtime.ready = False
@@ -888,8 +965,17 @@ class CoreService:
 
     def _start_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        job_id = uuid4().hex
-        cancel_event = threading.Event()
+        scan_key = self._listener_key(account_id)
+        with self._lock:
+            existing_id = self._scan_jobs.get(scan_key)
+            if existing_id:
+                existing = self._jobs.get(existing_id)
+                if existing and existing[0].is_alive():
+                    raise RuntimeError("此帳號已有歷史掃描進行中")
+                self._scan_jobs.pop(scan_key, None)
+            job_id = uuid4().hex
+            cancel_event = threading.Event()
+            self._scan_jobs[scan_key] = job_id
 
         def run_scan() -> None:
             def progress(message: str) -> None:
@@ -925,6 +1011,8 @@ class CoreService:
             finally:
                 with self._lock:
                     self._jobs.pop(job_id, None)
+                    if self._scan_jobs.get(scan_key) == job_id:
+                        self._scan_jobs.pop(scan_key, None)
 
         thread = threading.Thread(
             target=run_scan,

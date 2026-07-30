@@ -345,6 +345,7 @@ async def authenticate(
     phone: str,
     code_callback,
     password_callback,
+    status_callback=None,
 ):
     """Authenticate the personal Telegram client without requiring a CLI prompt."""
     from telethon import TelegramClient
@@ -356,7 +357,10 @@ async def authenticate(
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            await client.send_code_request(phone)
+            sent_code = await client.send_code_request(phone)
+            if status_callback:
+                delivery = type(getattr(sent_code, "type", None)).__name__
+                status_callback(delivery.replace("SentCodeType", "") or "未知方式")
             code_value = await code_callback()
             if not code_value:
                 raise ValueError("Telegram 驗證碼不可為空")

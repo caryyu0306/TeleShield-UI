@@ -47,6 +47,7 @@ class SetupWorker(QThread):
 
     code_required = Signal()
     password_required = Signal()
+    code_delivery = Signal(str)
     completed = Signal(bool, str)
 
     def __init__(self, api_id: str, api_hash: str, phone: str):
@@ -92,6 +93,7 @@ class SetupWorker(QThread):
                     self.phone,
                     self._get_code,
                     self._get_password,
+                    self.code_delivery.emit,
                 )
             )
             username = f"@{me.username}" if me.username else "無 username"
@@ -201,12 +203,34 @@ class SetupDialog(QDialog):
             self.phone.text().strip(),
         )
         self.worker.code_required.connect(self.ask_code)
+        self.worker.code_delivery.connect(self.show_code_delivery)
         self.worker.password_required.connect(self.ask_password)
         self.worker.completed.connect(self.login_completed)
         self.worker.start()
 
+    def show_code_delivery(self, delivery: str) -> None:
+        labels = {
+            "App": "Telegram App（已登入的其他裝置）",
+            "Sms": "SMS 簡訊",
+            "Call": "語音電話",
+            "FlashCall": "閃電電話",
+            "MissedCall": "未接來電",
+        }
+        destination = labels.get(delivery, delivery)
+        QMessageBox.information(
+            self,
+            "驗證碼已請求",
+            f"Telegram 回報的投遞方式：{destination}。\n\n"
+            "請先查看其他已登入裝置的 Telegram，尤其是官方「Telegram」服務訊息；"
+            "第三方登入不一定會收到 SMS。",
+        )
+
     def ask_code(self) -> None:
-        value, ok = QInputDialog.getText(self, "Telegram 驗證碼", "請輸入 Telegram 收到的驗證碼：")
+        value, ok = QInputDialog.getText(
+            self,
+            "Telegram 驗證碼",
+            "請輸入 Telegram 收到的驗證碼（不一定是 SMS）：",
+        )
         if ok and self.worker:
             self.worker.provide_code(value)
         elif self.worker:

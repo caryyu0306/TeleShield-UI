@@ -1,6 +1,17 @@
 import Foundation
 import BigInt
 
+private func defaultMTProtoHost(for dcID: Int) -> String {
+    switch dcID {
+    case 1: return "149.154.175.53"
+    case 2: return "149.154.167.51"
+    case 3: return "149.154.175.100"
+    case 4: return "149.154.167.91"
+    case 5: return "91.108.56.130"
+    default: return "149.154.167.51"
+    }
+}
+
 enum TelegramMTProtoError: LocalizedError {
     case invalidHandshake
     case invalidDHParameters
@@ -108,15 +119,19 @@ actor MTProtoClient {
         self.fixedSessionID = sessionID
         let suppliedTransport = transport
         let initialDCID = dcID
-        let initialHost = host ?? Self.host(for: dcID)
-        self.transport = suppliedTransport ?? MTProtoTransport(host: initialHost, port: port)
-        self.transportFactory = { targetDCID in
+        let initialHost = host ?? defaultMTProtoHost(for: dcID)
+        let initialTransport = suppliedTransport ?? MTProtoTransport(host: initialHost, port: port)
+        let initialSalt = session?.serverSalt ?? 0
+        let initialSessionID = sessionID ?? Int64.random(in: Int64.min...Int64.max)
+        let factory: @Sendable (Int) -> any MTProtoTransporting = { targetDCID in
             if let suppliedTransport { return suppliedTransport }
-            let targetHost = targetDCID == initialDCID ? initialHost : Self.host(for: targetDCID)
+            let targetHost = targetDCID == initialDCID ? initialHost : defaultMTProtoHost(for: targetDCID)
             return MTProtoTransport(host: targetHost, port: port)
         }
-        self.salt = session?.serverSalt ?? 0
-        self.sessionID = sessionID ?? Int64.random(in: Int64.min...Int64.max)
+        self.transport = initialTransport
+        self.salt = initialSalt
+        self.sessionID = initialSessionID
+        self.transportFactory = factory
     }
 
     func updateAPIID(_ apiID: Int) {
@@ -683,14 +698,4 @@ actor MTProtoClient {
         throw TelegramMTProtoError.factorizationFailed
     }
 
-    private nonisolated static func host(for dcID: Int) -> String {
-        switch dcID {
-        case 1: return "149.154.175.53"
-        case 2: return "149.154.167.51"
-        case 3: return "149.154.175.100"
-        case 4: return "149.154.167.91"
-        case 5: return "91.108.56.130"
-        default: return "149.154.167.51"
-        }
-    }
 }

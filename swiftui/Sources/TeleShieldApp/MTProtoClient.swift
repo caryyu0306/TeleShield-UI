@@ -683,7 +683,7 @@ actor MTProtoClient {
         throw TelegramMTProtoError.factorizationFailed
     }
 
-    private static func host(for dcID: Int) -> String {
+    private nonisolated static func host(for dcID: Int) -> String {
         switch dcID {
         case 1: return "149.154.175.53"
         case 2: return "149.154.167.51"

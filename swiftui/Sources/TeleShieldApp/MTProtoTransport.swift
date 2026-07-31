@@ -164,10 +164,20 @@ actor MTProtoTransport: MTProtoTransporting {
 
     func receive() async throws -> Data {
         guard let connection, connection.state == .ready else { throw MTProtoTransportError.notConnected }
-        return try await withThrowingTaskGroup(of: Data.self) { group in
-            group.addTask { [self] in try await self.readFrame() }
+        return try await Self.withTimeout(Self.receiveTimeout) { [weak self] in
+            guard let self else { throw MTProtoTransportError.connectionClosed }
+            return try await self.readFrame()
+        }
+    }
+
+    private nonisolated static func withTimeout<T: Sendable>(
+        _ timeout: Duration,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask(operation: operation)
             group.addTask {
-                try await Task.sleep(for: Self.receiveTimeout)
+                try await Task.sleep(for: timeout)
                 throw MTProtoTransportError.timeout
             }
             defer { group.cancelAll() }

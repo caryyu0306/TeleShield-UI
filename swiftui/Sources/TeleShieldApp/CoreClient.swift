@@ -1,6 +1,6 @@
 import Combine
 import Foundation
-import ServiceManagement
+@preconcurrency import ServiceManagement
 
 @MainActor
 final class CoreClient: ObservableObject {

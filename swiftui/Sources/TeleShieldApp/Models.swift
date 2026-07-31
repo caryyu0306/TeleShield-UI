@@ -79,6 +79,13 @@ struct ManagedGroup: Codable, Identifiable {
     let username: String
     let permission: String
     let enabled: Bool
+    /// Channel/supergroup references are retained separately from the UI
+    /// label.  A channel `access_hash` is required by
+    /// `updates.getChannelDifference`; looking it up from a truncated dialog
+    /// page each polling cycle is both expensive and unreliable.
+    let accessHash: Int64?
+    let isChannel: Bool
+    let isBroadcast: Bool
 
     var id: String { groupID }
 
@@ -88,14 +95,29 @@ struct ManagedGroup: Codable, Identifiable {
         case username
         case permission
         case enabled
+        case accessHash = "access_hash"
+        case isChannel = "is_channel"
+        case isBroadcast = "is_broadcast"
     }
 
-    init(groupID: String, title: String, username: String, permission: String, enabled: Bool) {
+    init(
+        groupID: String,
+        title: String,
+        username: String,
+        permission: String,
+        enabled: Bool,
+        accessHash: Int64? = nil,
+        isChannel: Bool = false,
+        isBroadcast: Bool = false
+    ) {
         self.groupID = groupID
         self.title = title
         self.username = username
         self.permission = permission
         self.enabled = enabled
+        self.accessHash = accessHash
+        self.isChannel = isChannel
+        self.isBroadcast = isBroadcast
     }
 
     init(from decoder: Decoder) throws {
@@ -111,6 +133,9 @@ struct ManagedGroup: Codable, Identifiable {
         username = (try? container.decode(String.self, forKey: .username)) ?? ""
         permission = (try? container.decode(String.self, forKey: .permission)) ?? ""
         enabled = (try? container.decode(Bool.self, forKey: .enabled)) ?? true
+        accessHash = try? container.decode(Int64.self, forKey: .accessHash)
+        isChannel = (try? container.decode(Bool.self, forKey: .isChannel)) ?? false
+        isBroadcast = (try? container.decode(Bool.self, forKey: .isBroadcast)) ?? false
     }
 }
 

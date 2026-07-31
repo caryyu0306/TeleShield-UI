@@ -226,6 +226,7 @@ actor TeleShieldStore {
         try saveConfiguration(.empty, accountID: accountID)
         try save(StoredBlockLog.empty, to: blockLogURL(accountID))
         try saveLearnedPatterns(.empty, accountID: accountID)
+        try save([NativeChannelUpdateState](), to: channelUpdateStatesURL(accountID))
         return account
     }
 
@@ -428,6 +429,34 @@ actor TeleShieldStore {
         try removeIfExists(updateStateURL(accountID))
     }
 
+    /// Loads all per-channel PTS values for an account.  The on-disk shape is
+    /// an array instead of a JSON dictionary so signed Telegram IDs remain
+    /// unambiguous and the file remains forward-compatible with additional
+    /// cursor metadata.
+    func loadChannelUpdateStates(accountID: String) throws -> [Int64: NativeChannelUpdateState] {
+        try ensureExistingAccountDirectory(accountID)
+        let states = try load([NativeChannelUpdateState].self, from: channelUpdateStatesURL(accountID)) ?? []
+        return Dictionary(states.map { ($0.channelID, $0) }, uniquingKeysWith: { _, latest in latest })
+    }
+
+    /// Atomically updates one channel cursor while preserving all other
+    /// channel cursors for the same account.
+    func saveChannelUpdateState(_ state: NativeChannelUpdateState, accountID: String) throws {
+        try ensureExistingAccountDirectory(accountID)
+        var states = try load([NativeChannelUpdateState].self, from: channelUpdateStatesURL(accountID)) ?? []
+        states.removeAll { $0.channelID == state.channelID }
+        states.append(state)
+        states.sort { $0.channelID < $1.channelID }
+        try save(states, to: channelUpdateStatesURL(accountID))
+    }
+
+    func clearChannelUpdateState(channelID: Int64, accountID: String) throws {
+        try ensureExistingAccountDirectory(accountID)
+        var states = try load([NativeChannelUpdateState].self, from: channelUpdateStatesURL(accountID)) ?? []
+        states.removeAll { $0.channelID == channelID }
+        try save(states, to: channelUpdateStatesURL(accountID))
+    }
+
     func saveSession(_ session: NativeSession, accountID: String) throws {
         try ensureExistingAccountDirectory(accountID)
         guard session.authKey.count == 256, (1...5).contains(session.dcID) else { throw NativeStoreError.invalidSession }
@@ -447,6 +476,7 @@ actor TeleShieldStore {
         try ensureExistingAccountDirectory(accountID)
         try removeIfExists(sessionMetadataURL(accountID))
         try removeIfExists(updateStateURL(accountID))
+        try removeIfExists(channelUpdateStatesURL(accountID))
         try keychain.delete(account: accountID, field: "authKey")
         var configuration = try configuration(accountID: accountID)
         configuration.userID = nil
@@ -491,6 +521,7 @@ actor TeleShieldStore {
     private func learnedPatternsURL(_ accountID: String) -> URL { accountDirectory(accountID).appendingPathComponent("learned_patterns.json") }
     private func sessionMetadataURL(_ accountID: String) -> URL { accountDirectory(accountID).appendingPathComponent("session.json") }
     private func updateStateURL(_ accountID: String) -> URL { accountDirectory(accountID).appendingPathComponent("updates.json") }
+    private func channelUpdateStatesURL(_ accountID: String) -> URL { accountDirectory(accountID).appendingPathComponent("channel_updates.json") }
 
     private func ensureAccountDirectory(_ accountID: String) throws {
         _ = try validateAccountID(accountID)

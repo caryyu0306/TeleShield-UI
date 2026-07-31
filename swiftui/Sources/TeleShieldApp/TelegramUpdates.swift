@@ -23,9 +23,27 @@ enum TelegramUpdatePage: Sendable {
     case tooLong(serverPTS: Int32)
 }
 
+/// A page from one channel/supergroup update box.  Channel PTS is independent
+/// from the account-wide `updates.State.pts` and must be committed separately.
+struct TelegramChannelDifference: Sendable {
+    let messages: [NativeMessage]
+    let chats: [NativeChat]
+    let users: [NativeUser]
+    let state: NativeChannelUpdateState
+    let isFinal: Bool
+    let didResetBaseline: Bool
+}
+
+enum TelegramChannelDifferencePage: Sendable {
+    case empty(state: NativeChannelUpdateState, isFinal: Bool)
+    case difference(TelegramChannelDifference)
+    case tooLong(state: NativeChannelUpdateState)
+}
+
 enum TelegramUpdateError: LocalizedError {
     case unsupportedUpdate(Int32)
     case differenceLoopLimit
+    case channelDifferenceLoopLimit
 
     var errorDescription: String? {
         switch self {
@@ -33,6 +51,8 @@ enum TelegramUpdateError: LocalizedError {
             return "Telegram updates 回傳未支援的 constructor：\(constructor)"
         case .differenceLoopLimit:
             return "Telegram updates 差異同步超過安全分頁上限"
+        case .channelDifferenceLoopLimit:
+            return "Telegram 頻道 updates 差異同步超過安全分頁上限"
         }
     }
 }
@@ -124,6 +144,89 @@ extension TelegramAPI {
         try parseUpdateDifferencePage(data)
     }
 
+    /// Fetches the independent update stream for a channel or supergroup.
+    /// Telegram recommends a small per-request limit for ordinary user
+    /// clients; the loop continues until the server marks the result final.
+    func getChannelDifference(
+        channel: NativeChat,
+        from initialPTS: Int32,
+        limit: Int32 = 100
+    ) async throws -> TelegramChannelDifference {
+        guard channel.isChannel,
+              !channel.isBroadcast,
+              let accessHash = channel.accessHash,
+              initialPTS >= 0 else {
+            throw TelegramAPIError.invalidResponse
+        }
+
+        var pts = initialPTS
+        var messages: [NativeMessage] = []
+        var chats: [NativeChat] = []
+        var users: [NativeUser] = []
+
+        for _ in 0..<128 {
+            var request = TLWriter()
+            request.writeInt32(Int32(bitPattern: 0x03173d78)) // updates.getChannelDifference
+            request.writeInt32(0) // force = false
+            request.writeInt32(Int32(bitPattern: 0xf35aec28)) // inputChannel
+            request.writeInt64(channel.id)
+            request.writeInt64(accessHash)
+            request.writeInt32(Int32(bitPattern: 0x94d42ee7)) // channelMessagesFilterEmpty
+            request.writeInt32(pts)
+            request.writeInt32(max(10, min(limit, 100)))
+
+            let response = try await call(request.data)
+            switch try parseChannelDifferencePage(response, channelID: channel.id) {
+            case .empty(let state, let isFinal):
+                return TelegramChannelDifference(
+                    messages: messages,
+                    chats: chats,
+                    users: users,
+                    state: state,
+                    isFinal: isFinal,
+                    didResetBaseline: false
+                )
+
+            case .difference(let page):
+                messages.append(contentsOf: page.messages)
+                chats.append(contentsOf: page.chats)
+                users.append(contentsOf: page.users)
+                pts = page.state.pts
+                if page.isFinal {
+                    return TelegramChannelDifference(
+                        messages: messages,
+                        chats: chats,
+                        users: users,
+                        state: NativeChannelUpdateState(channelID: channel.id, pts: pts),
+                        isFinal: true,
+                        didResetBaseline: false
+                    )
+                }
+
+            case .tooLong(let state):
+                return TelegramChannelDifference(
+                    messages: [],
+                    chats: [],
+                    users: [],
+                    state: state,
+                    isFinal: true,
+                    didResetBaseline: true
+                )
+            }
+        }
+
+        throw TelegramUpdateError.channelDifferenceLoopLimit
+    }
+
+    /// Offline-testable response boundary for one
+    /// `updates.getChannelDifference` result.
+    func parseChannelDifferenceResponse(
+        _ data: Data,
+        channelID: Int64
+    ) throws -> TelegramChannelDifferencePage {
+        try parseChannelDifferencePage(data, channelID: channelID)
+    }
+
     private func parseUpdateDifferencePage(_ data: Data) throws -> TelegramUpdatePage {
         var reader = TLReader(data)
         switch UInt32(bitPattern: try reader.readInt32()) {
@@ -151,6 +254,76 @@ extension TelegramAPI {
         default:
             throw TelegramAPIError.invalidResponse
         }
+    }
+
+    private func parseChannelDifferencePage(
+        _ data: Data,
+        channelID: Int64
+    ) throws -> TelegramChannelDifferencePage {
+        var reader = TLReader(data)
+        switch UInt32(bitPattern: try reader.readInt32()) {
+        case 0x3e11affb: // updates.channelDifferenceEmpty
+            let flags = try reader.readInt32()
+            let pts = try reader.readInt32()
+            if flags & 2 != 0 { _ = try reader.readInt32() } // timeout
+            guard reader.remaining == 0 else { throw TelegramAPIError.invalidResponse }
+            return .empty(
+                state: NativeChannelUpdateState(channelID: channelID, pts: pts),
+                isFinal: flags & 1 != 0
+            )
+
+        case 0x2064674e: // updates.channelDifference
+            let flags = try reader.readInt32()
+            let pts = try reader.readInt32()
+            if flags & 2 != 0 { _ = try reader.readInt32() } // timeout
+            let messages = try readMessageVector(&reader)
+            let otherUpdates = try readOtherUpdateVector(&reader)
+            let chats = try readChatVector(&reader)
+            let users = try readUserVector(&reader)
+            guard reader.remaining == 0 else { throw TelegramAPIError.invalidResponse }
+            return .difference(TelegramChannelDifference(
+                messages: messages + otherUpdates,
+                chats: chats,
+                users: users,
+                state: NativeChannelUpdateState(channelID: channelID, pts: pts),
+                isFinal: flags & 1 != 0,
+                didResetBaseline: false
+            ))
+
+        case 0xa4bcc6fe: // updates.channelDifferenceTooLong
+            let flags = try reader.readInt32()
+            if flags & 2 != 0 { _ = try reader.readInt32() } // timeout
+            let latestPTS = try readChannelDifferenceDialogPTS(&reader)
+            _ = try readMessageVector(&reader)
+            _ = try readChatVector(&reader)
+            _ = try readUserVector(&reader)
+            guard reader.remaining == 0 else { throw TelegramAPIError.invalidResponse }
+            return .tooLong(state: NativeChannelUpdateState(channelID: channelID, pts: latestPTS))
+
+        default:
+            throw TelegramAPIError.invalidResponse
+        }
+    }
+
+    private func readChannelDifferenceDialogPTS(_ reader: inout TLReader) throws -> Int32 {
+        guard UInt32(bitPattern: try reader.readInt32()) == 0xd58a08c6 else {
+            throw TelegramAPIError.invalidResponse
+        }
+        let flags = try reader.readInt32()
+        _ = try readPeer(&reader)
+        _ = try reader.readInt32() // top_message
+        _ = try reader.readInt32() // read_inbox_max_id
+        _ = try reader.readInt32() // read_outbox_max_id
+        _ = try reader.readInt32() // unread_count
+        _ = try reader.readInt32() // unread_mentions_count
+        _ = try reader.readInt32() // unread_reactions_count
+        try skipPeerNotifySettingsForUpdates(&reader)
+        guard flags & 1 != 0 else { throw TelegramAPIError.invalidResponse }
+        let pts = try reader.readInt32()
+        if flags & 2 != 0 { try skipDraftForUpdates(&reader) }
+        if flags & 16 != 0 { _ = try reader.readInt32() }
+        if flags & 32 != 0 { _ = try reader.readInt32() }
+        return pts
     }
 
     private func readDifferencePayload(_ reader: inout TLReader) throws -> TelegramUpdateDifference {

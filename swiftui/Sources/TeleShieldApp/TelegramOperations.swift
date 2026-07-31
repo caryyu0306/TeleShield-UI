@@ -247,20 +247,21 @@ extension TelegramAPI {
         // crash the parser through Dictionary(uniqueKeysWithValues:).
         let chatMap = Dictionary(chats.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         let userMap = Dictionary(users.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
-        let dialogs = peerList.map { peer -> NativeDialog in
+        let dialogs = peerList.map { parsed -> NativeDialog in
+            let peer = parsed.peer
             let enrichedPeer: NativePeer
             switch peer {
             case .user(let id, _):
                 let user = userMap[id]
                 enrichedPeer = .user(id: id, accessHash: user?.accessHash)
-                return NativeDialog(peer: enrichedPeer, title: user?.displayName ?? String(id), isPrivate: true, isGroup: false, isBroadcast: false)
+                return NativeDialog(peer: enrichedPeer, title: user?.displayName ?? String(id), isPrivate: true, isGroup: false, isBroadcast: false, channelPTS: nil)
             case .chat(let id):
                 enrichedPeer = .chat(id: id)
-                return NativeDialog(peer: enrichedPeer, title: chatMap[id]?.title ?? String(id), isPrivate: false, isGroup: true, isBroadcast: false)
+                return NativeDialog(peer: enrichedPeer, title: chatMap[id]?.title ?? String(id), isPrivate: false, isGroup: true, isBroadcast: false, channelPTS: nil)
             case .channel(let id, _):
                 let chat = chatMap[id]
                 enrichedPeer = .channel(id: id, accessHash: chat?.accessHash)
-                return NativeDialog(peer: enrichedPeer, title: chat?.title ?? String(id), isPrivate: false, isGroup: true, isBroadcast: chat?.isBroadcast ?? false)
+                return NativeDialog(peer: enrichedPeer, title: chat?.title ?? String(id), isPrivate: false, isGroup: true, isBroadcast: chat?.isBroadcast ?? false, channelPTS: parsed.channelPTS)
             }
         }
         guard reader.remaining == 0 else { throw TelegramAPIError.invalidResponse }
@@ -299,7 +300,12 @@ extension TelegramAPI {
         return TelegramHistoryPage(messages: messages, chats: chats, users: users)
     }
 
-    private func readDialogPeer(_ reader: inout TLReader) throws -> NativePeer {
+    private struct ParsedDialogPeer {
+        let peer: NativePeer
+        let channelPTS: Int32?
+    }
+
+    private func readDialogPeer(_ reader: inout TLReader) throws -> ParsedDialogPeer {
         switch try reader.readInt32() {
         case Int32(bitPattern: 0xd58a08c6): // dialog
             let flags = try reader.readInt32()
@@ -311,11 +317,11 @@ extension TelegramAPI {
             _ = try reader.readInt32() // unread_mentions_count
             _ = try reader.readInt32() // unread_reactions_count
             try skipPeerNotifySettings(&reader)
-            if flags & 1 != 0 { _ = try reader.readInt32() } // pts
+            let channelPTS = flags & 1 != 0 ? try reader.readInt32() : nil // pts
             if flags & 2 != 0 { try skipDraft(&reader) }
             if flags & 16 != 0 { _ = try reader.readInt32() } // folder_id
             if flags & 32 != 0 { _ = try reader.readInt32() } // ttl_period
-            return peer
+            return ParsedDialogPeer(peer: peer, channelPTS: channelPTS)
 
         case 1908216652: // dialogFolder
             let flags = try reader.readInt32()
@@ -327,7 +333,7 @@ extension TelegramAPI {
             _ = try reader.readInt32() // unread_muted_messages_count
             _ = try reader.readInt32() // unread_unmuted_messages_count
             _ = flags
-            return peer
+            return ParsedDialogPeer(peer: peer, channelPTS: nil)
 
         default:
             throw TelegramAPIError.invalidResponse
@@ -543,7 +549,17 @@ extension TelegramAPI {
         if flags2 & 128 != 0 { try skipSuggestedPost(&reader) }
         if flags2 & 1024 != 0 { _ = try reader.readInt32() }
         if flags2 & 2048 != 0 { _ = try reader.readString() }
-        return NativeMessage(id: id, peerID: peerID(peer), senderID: sender.map(peerID), date: date, text: text, hasPhoto: hasPhoto, photo: photo)
+        return NativeMessage(
+            id: id,
+            peerID: peerID(peer),
+            senderID: sender.map(peerID),
+            date: date,
+            text: text,
+            hasPhoto: hasPhoto,
+            photo: photo,
+            peerIdentity: peer.stableID,
+            senderIdentity: sender?.stableID
+        )
     }
 
     private func skipMessageService(_ reader: inout TLReader) throws {

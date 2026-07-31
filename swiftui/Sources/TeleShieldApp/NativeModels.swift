@@ -212,6 +212,28 @@ struct NativeUpdateState: Codable, Sendable, Equatable {
     }
 }
 
+/// Persistent PTS for one channel/supergroup message box.
+///
+/// Telegram has a separate update sequence for every channel/supergroup;
+/// the common `updates.getDifference` cursor cannot be used to recover those
+/// messages.  Keeping this value in its own record also lets a failed action
+/// leave only that channel eligible for retry without rewinding the common
+/// account cursor.
+struct NativeChannelUpdateState: Codable, Sendable, Equatable {
+    let channelID: Int64
+    var pts: Int32
+
+    enum CodingKeys: String, CodingKey {
+        case channelID = "channel_id"
+        case pts
+    }
+
+    init(channelID: Int64, pts: Int32) {
+        self.channelID = channelID
+        self.pts = pts
+    }
+}
+
 struct NativeUser: Sendable, Equatable {
     let id: Int64
     let accessHash: Int64?
@@ -243,15 +265,33 @@ struct NativeMessage: Sendable, Equatable {
     let id: Int32
     let peerID: Int64
     let senderID: Int64?
+    /// Telegram user/chat/channel namespaces are distinct even when their
+    /// numeric IDs happen to overlap.  Keep the decoded peer kinds alongside
+    /// the legacy numeric projections so moderation never has to infer a
+    /// channel from an Int64 alone.
+    let peerIdentity: NativePeerIdentity?
+    let senderIdentity: NativePeerIdentity?
     let date: Date
     let text: String
     let hasPhoto: Bool
     let photo: NativePhotoReference?
 
-    init(id: Int32, peerID: Int64, senderID: Int64?, date: Date, text: String, hasPhoto: Bool, photo: NativePhotoReference? = nil) {
+    init(
+        id: Int32,
+        peerID: Int64,
+        senderID: Int64?,
+        date: Date,
+        text: String,
+        hasPhoto: Bool,
+        photo: NativePhotoReference? = nil,
+        peerIdentity: NativePeerIdentity? = nil,
+        senderIdentity: NativePeerIdentity? = nil
+    ) {
         self.id = id
         self.peerID = peerID
         self.senderID = senderID
+        self.peerIdentity = peerIdentity
+        self.senderIdentity = senderIdentity
         self.date = date
         self.text = text
         self.hasPhoto = hasPhoto
@@ -273,6 +313,10 @@ struct NativeDialog: Sendable, Equatable {
     let isPrivate: Bool
     let isGroup: Bool
     let isBroadcast: Bool
+    /// Initial channel PTS carried by `messages.dialog` when available.
+    /// This is only a bootstrap value; the durable cursor lives in
+    /// `NativeChannelUpdateState`.
+    let channelPTS: Int32?
 }
 
 enum NativePeer: Sendable, Equatable, Hashable {

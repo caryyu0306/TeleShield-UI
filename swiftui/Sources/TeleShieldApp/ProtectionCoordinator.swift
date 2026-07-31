@@ -22,12 +22,23 @@ actor ProtectionCoordinator {
         let userID: Int64
     }
 
+    private struct ChannelCandidate {
+        let chat: NativeChat
+        let initialPTS: Int32?
+    }
+
+    private struct ChannelSyncResult {
+        let states: [Int64: NativeChannelUpdateState]
+        let handledActionKeys: Set<ActionKey>
+    }
+
     private let accountID: String
     private let api: TelegramAPI
     private let store: TeleShieldStore
-    private let configuration: StoredConfiguration
+    private var configuration: StoredConfiguration
     private var monitoringTask: Task<Void, Never>?
     private var processedMessageIDs = Set<ProcessedMessageKey>()
+    private var warnedChannelIDs = Set<Int64>()
 
     init(accountID: String, api: TelegramAPI, store: TeleShieldStore, configuration: StoredConfiguration) {
         self.accountID = accountID
@@ -49,11 +60,16 @@ actor ProtectionCoordinator {
         task?.cancel()
         await task?.value
         processedMessageIDs.removeAll(keepingCapacity: false)
+        warnedChannelIDs.removeAll(keepingCapacity: false)
     }
 
     func scan(scope: String, dryRun: Bool, settings: ScanSettings, progress: @escaping @Sendable (String) -> Void) async throws -> NativeScanResult {
         let normalizedScope = try normalizedScope(scope)
         let settings = settings.normalized
+        // Settings and lists can be edited while a coordinator is retained by
+        // the app.  Read the actor-owned snapshot at operation start instead
+        // of silently scanning with the configuration captured at launch.
+        configuration = try await store.configuration(accountID: accountID)
         var findings: [ScanFinding] = []
         var matched = 0
         var acted = 0
@@ -92,7 +108,7 @@ actor ProtectionCoordinator {
                     try Task.checkCancellation()
                     let days = dialog.isPrivate ? settings.privateDays : settings.groupDays
                     guard message.date >= Date().addingTimeInterval(-TimeInterval(days * 86_400)) else { continue }
-                    guard let senderID = message.senderID,
+                    guard let senderID = userSenderID(for: message),
                           let user = users[senderID],
                           !user.isSelf,
                           !user.isBot,
@@ -130,6 +146,7 @@ actor ProtectionCoordinator {
         // only after the current batch has been handled; a failed destructive
         // action therefore leaves the batch eligible for a retry.
         var updateState: NativeUpdateState?
+        var channelStates: [Int64: NativeChannelUpdateState]?
         while !Task.isCancelled {
             do {
                 var handledActionKeys = Set<ActionKey>()
@@ -143,6 +160,15 @@ actor ProtectionCoordinator {
                     progress("背景防護暫停本輪：無法讀取帳號設定")
                     try? await Task.sleep(for: .seconds(15))
                     continue
+                }
+                // A coordinator is retained across UI refreshes.  Keep its
+                // in-memory snapshot aligned with the actor-owned store so a
+                // newly edited whitelist or group selection takes effect on
+                // the next poll.
+                configuration = currentConfiguration
+
+                if channelStates == nil {
+                    channelStates = try await store.loadChannelUpdateStates(accountID: accountID)
                 }
 
                 if updateState == nil {
@@ -183,52 +209,38 @@ actor ProtectionCoordinator {
 
                 let users = Dictionary(difference.users.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
                 let chats = Dictionary(difference.chats.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
-                let enabledGroupIDs = Set(currentConfiguration.managedGroups.filter(\.enabled).compactMap { Int64($0.groupID) })
-                let hasManagedGroups = !currentConfiguration.managedGroups.isEmpty
-                let messages = difference.messages.sorted {
-                    if $0.date == $1.date { return $0.id < $1.id }
-                    return $0.date < $1.date
-                }
-                for message in messages {
-                    try Task.checkCancellation()
-                    guard let dialog = dialog(for: message, users: users, chats: chats) else { continue }
-                    if dialog.isGroup {
-                        guard currentConfiguration.listenScanGroups,
-                              matchesScope(dialog, scope: "group", enabledGroupIDs: enabledGroupIDs, hasManagedGroups: hasManagedGroups),
-                              chats[peerID(dialog.peer)]?.adminRights == true else { continue }
-                    }
-                    let peerIdentity = dialog.peer.stableID
-                    let key = ProcessedMessageKey(peer: peerIdentity, messageID: message.id)
-                    guard !processedMessageIDs.contains(key) else { continue }
-                    guard let senderID = message.senderID,
-                          let user = users[senderID],
-                          !user.isSelf,
-                          !user.isBot,
-                          !contactIDs.contains(user.id) else {
-                        processedMessageIDs.insert(key)
-                        continue
-                    }
-                    guard let reason = try await evaluate(user: user, message: message, rules: rules) else {
-                        processedMessageIDs.insert(key)
-                        continue
-                    }
-                    let actionKey = ActionKey(peer: peerIdentity, userID: user.id)
-                    if handledActionKeys.contains(actionKey) {
-                        processedMessageIDs.insert(key)
-                        continue
-                    }
-                    let acted = try await performAction(user: user, dialog: dialog, chats: chats, reason: reason)
-                    handledActionKeys.insert(actionKey)
-                    if acted {
-                        progress("已處理 \(user.displayName)：\(reason)")
-                    }
-                    processedMessageIDs.insert(key)
-                }
+                handledActionKeys = try await processMessages(
+                    difference.messages,
+                    users: users,
+                    chats: chats,
+                    currentConfiguration: currentConfiguration,
+                    contactIDs: contactIDs,
+                    rules: rules,
+                    handledActionKeys: handledActionKeys,
+                    progress: progress
+                )
 
                 try Task.checkCancellation()
                 try await store.saveUpdateState(difference.state, accountID: accountID)
                 updateState = difference.state
                 if processedMessageIDs.count > 10_000 { processedMessageIDs.removeAll(keepingCapacity: true) }
+
+                // Channel/supergroup PTS is an independent update stream.
+                // A failure here is isolated to that channel: the common
+                // account cursor above is already committed, while each
+                // channel cursor is committed only after its own actions.
+                if currentConfiguration.listenScanGroups {
+                    let channelResult = await syncConfiguredChannels(
+                        currentConfiguration: currentConfiguration,
+                        contactIDs: contactIDs,
+                        rules: rules,
+                        currentStates: channelStates ?? [:],
+                        handledActionKeys: handledActionKeys,
+                        progress: progress
+                    )
+                    channelStates = channelResult.states
+                    handledActionKeys = channelResult.handledActionKeys
+                }
             } catch is CancellationError {
                 break
             } catch {
@@ -238,14 +250,232 @@ actor ProtectionCoordinator {
         }
     }
 
+    private func processMessages(
+        _ messages: [NativeMessage],
+        users: [Int64: NativeUser],
+        chats: [Int64: NativeChat],
+        currentConfiguration: StoredConfiguration,
+        contactIDs: Set<Int64>,
+        rules: SpamRuleEngine,
+        handledActionKeys: Set<ActionKey>,
+        progress: @escaping @Sendable (String) -> Void
+    ) async throws -> Set<ActionKey> {
+        var handled = handledActionKeys
+        let enabledGroupIDs = Set(currentConfiguration.managedGroups.filter(\.enabled).compactMap { Int64($0.groupID) })
+        let hasManagedGroups = !currentConfiguration.managedGroups.isEmpty
+        let sortedMessages = messages.sorted {
+            if $0.date == $1.date { return $0.id < $1.id }
+            return $0.date < $1.date
+        }
+
+        for message in sortedMessages {
+            try Task.checkCancellation()
+            guard let dialog = dialog(for: message, users: users, chats: chats) else { continue }
+            if dialog.isGroup {
+                guard currentConfiguration.listenScanGroups,
+                      matchesScope(dialog, scope: "group", enabledGroupIDs: enabledGroupIDs, hasManagedGroups: hasManagedGroups),
+                      chats[peerID(dialog.peer)]?.adminRights == true else { continue }
+            }
+            let peerIdentity = dialog.peer.stableID
+            let key = ProcessedMessageKey(peer: peerIdentity, messageID: message.id)
+            guard !processedMessageIDs.contains(key) else { continue }
+            guard let senderID = userSenderID(for: message),
+                  let user = users[senderID],
+                  !user.isSelf,
+                  !user.isBot,
+                  !contactIDs.contains(user.id) else {
+                processedMessageIDs.insert(key)
+                continue
+            }
+            guard let reason = try await evaluate(user: user, message: message, rules: rules) else {
+                processedMessageIDs.insert(key)
+                continue
+            }
+            let actionKey = ActionKey(peer: peerIdentity, userID: user.id)
+            if handled.contains(actionKey) {
+                processedMessageIDs.insert(key)
+                continue
+            }
+            let acted = try await performAction(user: user, dialog: dialog, chats: chats, reason: reason)
+            handled.insert(actionKey)
+            if acted {
+                progress("已處理 \(user.displayName)：\(reason)")
+            }
+            processedMessageIDs.insert(key)
+        }
+        return handled
+    }
+
+    private func syncConfiguredChannels(
+        currentConfiguration: StoredConfiguration,
+        contactIDs: Set<Int64>,
+        rules: SpamRuleEngine,
+        currentStates: [Int64: NativeChannelUpdateState],
+        handledActionKeys: Set<ActionKey>,
+        progress: @escaping @Sendable (String) -> Void
+    ) async -> ChannelSyncResult {
+        var states = currentStates
+        var handled = handledActionKeys
+
+        let page: TelegramDialogPage
+        do {
+            // One bounded dialog page is enough for the normal UI-managed
+            // set.  Persisted channel cursors continue to work even when a
+            // configured group is temporarily absent from this page.
+            page = try await api.getDialogs(limit: 100)
+        } catch {
+            progress("群組背景防護暫停本輪：無法重新整理頻道清單")
+            return ChannelSyncResult(states: states, handledActionKeys: handled)
+        }
+
+        let pageChats = Dictionary(page.chats.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        let enabledGroupIDs = Set(currentConfiguration.managedGroups.filter(\.enabled).compactMap { Int64($0.groupID) })
+        let hasManagedGroups = !currentConfiguration.managedGroups.isEmpty
+        var candidates: [Int64: ChannelCandidate] = [:]
+
+        for dialog in page.dialogs {
+            guard dialog.isGroup,
+                  !dialog.isBroadcast,
+                  matchesScope(dialog, scope: "group", enabledGroupIDs: enabledGroupIDs, hasManagedGroups: hasManagedGroups),
+                  case .channel(let channelID, _) = dialog.peer,
+                  let chat = pageChats[channelID],
+                  chat.isChannel,
+                  !chat.isBroadcast,
+                  chat.adminRights,
+                  chat.accessHash != nil else { continue }
+            candidates[channelID] = ChannelCandidate(chat: chat, initialPTS: dialog.channelPTS)
+        }
+
+        // Keep working with a previously discovered channel when Telegram's
+        // current dialog page does not include it.  The persisted permission
+        // is only used to preserve the candidate; performAction still asks
+        // Telegram to confirm the target user is not an administrator before
+        // every destructive group action.
+        for group in currentConfiguration.managedGroups where group.enabled && group.isChannel && !group.isBroadcast {
+            guard let channelID = Int64(group.groupID), candidates[channelID] == nil,
+                  let accessHash = group.accessHash,
+                  persistedAdminPermission(group.permission) else { continue }
+            candidates[channelID] = ChannelCandidate(
+                chat: NativeChat(
+                    id: channelID,
+                    accessHash: accessHash,
+                    title: group.title,
+                    username: group.username,
+                    isChannel: true,
+                    isBroadcast: false,
+                    isMegagroup: true,
+                    adminRights: true
+                ),
+                initialPTS: nil
+            )
+        }
+
+        for channelID in candidates.keys.sorted() {
+            guard !Task.isCancelled, let candidate = candidates[channelID] else { break }
+            var state = states[channelID]
+            do {
+                if state == nil {
+                    guard let initialPTS = candidate.initialPTS, initialPTS >= 0 else {
+                        warnMissingChannelBaseline(channelID: channelID, title: candidate.chat.title, progress: progress)
+                        continue
+                    }
+                    state = NativeChannelUpdateState(channelID: channelID, pts: initialPTS)
+                    try await store.saveChannelUpdateState(state!, accountID: accountID)
+                    progress("已建立群組 \(candidate.chat.title) 的 Telegram channel cursor")
+                }
+                guard let state else { continue }
+
+                let difference = try await api.getChannelDifference(channel: candidate.chat, from: state.pts)
+                if difference.didResetBaseline {
+                    try await store.saveChannelUpdateState(difference.state, accountID: accountID)
+                    states[channelID] = difference.state
+                    progress("群組 \(candidate.chat.title) 的更新缺口過大，已安全重建 channel cursor")
+                    continue
+                }
+
+                var chats = pageChats
+                for chat in difference.chats { chats[chat.id] = chat }
+                let users = Dictionary(difference.users.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+                handled = try await processMessages(
+                    difference.messages,
+                    users: users,
+                    chats: chats,
+                    currentConfiguration: currentConfiguration,
+                    contactIDs: contactIDs,
+                    rules: rules,
+                    handledActionKeys: handled,
+                    progress: progress
+                )
+                try Task.checkCancellation()
+                try await store.saveChannelUpdateState(difference.state, accountID: accountID)
+                states[channelID] = difference.state
+            } catch is CancellationError {
+                break
+            } catch {
+                progress("群組 \(candidate.chat.title) 同步暫停：\(error.localizedDescription)")
+            }
+        }
+
+        return ChannelSyncResult(states: states, handledActionKeys: handled)
+    }
+
+    private func persistedAdminPermission(_ permission: String) -> Bool {
+        let normalized = permission.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "admin" || normalized == "administrator" || normalized == "creator" || normalized == "owner"
+    }
+
+    private func warnMissingChannelBaseline(
+        channelID: Int64,
+        title: String,
+        progress: @escaping @Sendable (String) -> Void
+    ) {
+        guard warnedChannelIDs.insert(channelID).inserted else { return }
+        progress("群組 \(title) 尚未取得 channel PTS，暫不追溯歷史訊息")
+    }
+
     private func dialog(for message: NativeMessage, users: [Int64: NativeUser], chats: [Int64: NativeChat]) -> NativeDialog? {
+        if let identity = message.peerIdentity {
+            switch identity {
+            case .user(let id):
+                guard let user = users[id] else { return nil }
+                return NativeDialog(
+                    peer: .user(id: user.id, accessHash: user.accessHash),
+                    title: user.displayName,
+                    isPrivate: true,
+                    isGroup: false,
+                    isBroadcast: false,
+                    channelPTS: nil
+                )
+            case .chat(let id):
+                guard let chat = chats[id] else { return nil }
+                return NativeDialog(
+                    peer: .chat(id: id),
+                    title: chat.title,
+                    isPrivate: false,
+                    isGroup: true,
+                    isBroadcast: false,
+                    channelPTS: nil
+                )
+            case .channel(let id):
+                guard let chat = chats[id] else { return nil }
+                return NativeDialog(
+                    peer: .channel(id: id, accessHash: chat.accessHash),
+                    title: chat.title,
+                    isPrivate: false,
+                    isGroup: true,
+                    isBroadcast: chat.isBroadcast,
+                    channelPTS: nil
+                )
+            }
+        }
         if let user = users[message.peerID] {
             return NativeDialog(
                 peer: .user(id: user.id, accessHash: user.accessHash),
                 title: user.displayName,
                 isPrivate: true,
                 isGroup: false,
-                isBroadcast: false
+                isBroadcast: false,
+                channelPTS: nil
             )
         }
         guard let chat = chats[message.peerID] else { return nil }
@@ -257,8 +487,17 @@ actor ProtectionCoordinator {
             title: chat.title,
             isPrivate: false,
             isGroup: true,
-            isBroadcast: chat.isBroadcast
+            isBroadcast: chat.isBroadcast,
+            channelPTS: nil
         )
+    }
+
+    private func userSenderID(for message: NativeMessage) -> Int64? {
+        if let senderIdentity = message.senderIdentity {
+            guard case .user(let id) = senderIdentity else { return nil }
+            return id
+        }
+        return message.senderID
     }
 
     private func matchesScope(_ dialog: NativeDialog, scope: String, enabledGroupIDs: Set<Int64>, hasManagedGroups: Bool) -> Bool {
@@ -294,7 +533,9 @@ actor ProtectionCoordinator {
             date: message.date,
             text: text,
             hasPhoto: true,
-            photo: photo
+            photo: photo,
+            peerIdentity: message.peerIdentity,
+            senderIdentity: message.senderIdentity
         )
         guard rules.evaluate(user: user, message: ocrMessage) != nil else { return nil }
         return "[OCR] \(String(text.prefix(120)))"

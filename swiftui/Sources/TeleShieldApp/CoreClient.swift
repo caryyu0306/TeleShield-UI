@@ -599,13 +599,31 @@ final class CoreClient: ObservableObject {
             let discovered = page.chats
                 .filter { !$0.isBroadcast && $0.adminRights }
                 .map {
-                    ManagedGroup(groupID: String($0.id), title: $0.title, username: $0.username, permission: "admin", enabled: true)
+                    ManagedGroup(
+                        groupID: String($0.id),
+                        title: $0.title,
+                        username: $0.username,
+                        permission: "admin",
+                        enabled: true,
+                        accessHash: $0.accessHash,
+                        isChannel: $0.isChannel,
+                        isBroadcast: $0.isBroadcast
+                    )
                 }
             try await store.updateConfiguration(accountID: accountID) { config in
                 let existing = Dictionary(config.managedGroups.map { ($0.groupID, $0) }, uniquingKeysWith: { first, _ in first })
                 var merged = discovered.map { group in
                     guard let old = existing[group.groupID] else { return group }
-                    return ManagedGroup(groupID: group.groupID, title: group.title, username: group.username, permission: group.permission, enabled: old.enabled)
+                    return ManagedGroup(
+                        groupID: group.groupID,
+                        title: group.title,
+                        username: group.username,
+                        permission: group.permission,
+                        enabled: old.enabled,
+                        accessHash: group.accessHash ?? old.accessHash,
+                        isChannel: group.isChannel || old.isChannel,
+                        isBroadcast: group.isBroadcast || old.isBroadcast
+                    )
                 }
                 let discoveredIDs = Set(discovered.map(\.groupID))
                 merged.append(contentsOf: config.managedGroups.filter { !discoveredIDs.contains($0.groupID) })
@@ -624,7 +642,18 @@ final class CoreClient: ObservableObject {
         do {
             try await store.updateConfiguration(accountID: accountID) { config in
                 config.managedGroups = config.managedGroups.map {
-                    $0.groupID == groupID ? ManagedGroup(groupID: $0.groupID, title: $0.title, username: $0.username, permission: $0.permission, enabled: enabled) : $0
+                    $0.groupID == groupID
+                        ? ManagedGroup(
+                            groupID: $0.groupID,
+                            title: $0.title,
+                            username: $0.username,
+                            permission: $0.permission,
+                            enabled: enabled,
+                            accessHash: $0.accessHash,
+                            isChannel: $0.isChannel,
+                            isBroadcast: $0.isBroadcast
+                        )
+                        : $0
                 }
             }
             groups = try await store.configuration(accountID: accountID).managedGroups

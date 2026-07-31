@@ -306,6 +306,122 @@ final class NativeStackTests: XCTestCase {
         XCTAssertEqual(state, NativeUpdateState(pts: 101, qts: 202, date: 1_700_000_000, seq: 303, unreadCount: 4))
     }
 
+    func testTelegramChannelDifferenceEmptyFixtureUsesIndependentPTS() async throws {
+        var writer = TLWriter()
+        writer.writeInt32(Int32(bitPattern: 0x3e11affb)) // updates.channelDifferenceEmpty
+        writer.writeInt32(1) // final
+        writer.writeInt32(4_242) // pts
+
+        let api = TelegramAPI(apiID: 123, apiHash: "fixture")
+        let page = try await api.parseChannelDifferenceResponse(writer.data, channelID: 9001)
+
+        guard case .empty(let state, let isFinal) = page else {
+            XCTFail("Expected updates.channelDifferenceEmpty")
+            return
+        }
+        XCTAssertTrue(isFinal)
+        XCTAssertEqual(state, NativeChannelUpdateState(channelID: 9001, pts: 4_242))
+    }
+
+    func testTelegramChannelDifferenceFixtureConsumesMessagesAndEntityVectors() async throws {
+        var message = TLWriter()
+        message.writeInt32(Int32(bitPattern: 0x3ae56482)) // message
+        message.writeInt32(256) // sender_id present
+        message.writeInt32(0) // flags2
+        message.writeInt32(88) // id
+        writeFixtureUserPeer(&message, id: 77)
+        message.writeInt32(-1_566_230_754) // peerChannel
+        message.writeInt64(9001)
+        message.writeInt32(1_700_000_100)
+        try message.writeString("channel difference fixture")
+
+        var response = TLWriter()
+        response.writeInt32(Int32(bitPattern: 0x2064674e)) // updates.channelDifference
+        response.writeInt32(1) // final
+        response.writeInt32(4_243) // pts
+        response.writeVector([message.data]) { writer, value in writer.append(value) }
+        response.writeVector([Int32]()) { _, _ in }
+        response.writeVector([Int32]()) { _, _ in }
+        response.writeVector([Int32]()) { _, _ in }
+
+        let api = TelegramAPI(apiID: 123, apiHash: "fixture")
+        let page = try await api.parseChannelDifferenceResponse(response.data, channelID: 9001)
+
+        guard case .difference(let difference) = page else {
+            XCTFail("Expected updates.channelDifference")
+            return
+        }
+        XCTAssertTrue(difference.isFinal)
+        XCTAssertEqual(difference.state, NativeChannelUpdateState(channelID: 9001, pts: 4_243))
+        XCTAssertEqual(difference.messages.map(\.id), [88])
+        XCTAssertEqual(difference.messages.first?.peerID, 9001)
+        XCTAssertEqual(difference.messages.first?.senderID, 77)
+    }
+
+    func testTelegramChannelDifferenceTooLongResetsToDialogPTS() async throws {
+        var response = TLWriter()
+        response.writeInt32(Int32(bitPattern: 0xa4bcc6fe)) // updates.channelDifferenceTooLong
+        response.writeInt32(1) // final
+        response.writeInt32(Int32(bitPattern: 0xd58a08c6)) // dialog
+        response.writeInt32(1) // pts is present
+        response.writeInt32(-1_566_230_754) // peerChannel
+        response.writeInt64(9001)
+        for _ in 0..<6 { response.writeInt32(0) }
+        response.writeInt32(-1_721_619_444) // peerNotifySettings
+        response.writeInt32(0)
+        response.writeInt32(4_500) // dialog pts
+        for _ in 0..<3 {
+            response.writeInt32(TLConstructor.vector)
+            response.writeInt32(0)
+        }
+
+        let api = TelegramAPI(apiID: 123, apiHash: "fixture")
+        let page = try await api.parseChannelDifferenceResponse(response.data, channelID: 9001)
+
+        guard case .tooLong(let state) = page else {
+            XCTFail("Expected updates.channelDifferenceTooLong")
+            return
+        }
+        XCTAssertEqual(state, NativeChannelUpdateState(channelID: 9001, pts: 4_500))
+    }
+
+    func testTelegramChannelDifferenceRequestUsesInputChannelAndEmptyFilter() async throws {
+        let authKey = Data((0..<256).map { UInt8($0 & 0xff) })
+        let session = NativeSession(dcID: 2, authKey: authKey, userID: 7, serverSalt: 11, date: Date())
+        var empty = TLWriter()
+        empty.writeInt32(Int32(bitPattern: 0x3e11affb)) // updates.channelDifferenceEmpty
+        empty.writeInt32(1) // final
+        empty.writeInt32(321)
+        let transport = RecordingMTProtoTransport(authKey: authKey, resultBodies: [empty.data], sessionID: 93)
+        let api = TelegramAPI(apiID: 123, apiHash: "fixture", session: session, transport: transport, sessionID: 93)
+        let channel = NativeChat(
+            id: 9001,
+            accessHash: 123_456,
+            title: "Fixture channel",
+            username: "fixture",
+            isChannel: true,
+            isBroadcast: false,
+            isMegagroup: true,
+            adminRights: true
+        )
+
+        let difference = try await api.getChannelDifference(channel: channel, from: 320, limit: 500)
+        XCTAssertEqual(difference.state, NativeChannelUpdateState(channelID: 9001, pts: 321))
+
+        let requestBodies = await transport.requestBodiesSnapshot
+        XCTAssertEqual(requestBodies.count, 1)
+        var reader = TLReader(try unwrapInitConnectionQuery(requestBodies[0]))
+        XCTAssertEqual(try reader.readInt32(), Int32(bitPattern: 0x03173d78))
+        XCTAssertEqual(try reader.readInt32(), 0) // force
+        XCTAssertEqual(try reader.readInt32(), Int32(bitPattern: 0xf35aec28))
+        XCTAssertEqual(try reader.readInt64(), 9001)
+        XCTAssertEqual(try reader.readInt64(), 123_456)
+        XCTAssertEqual(try reader.readInt32(), Int32(bitPattern: 0x94d42ee7))
+        XCTAssertEqual(try reader.readInt32(), 320)
+        XCTAssertEqual(try reader.readInt32(), 100) // clamped protocol limit
+        XCTAssertEqual(reader.remaining, 0)
+    }
+
     func testTelegramDifferenceFixtureConsumesMessagesAndOtherUpdates() async throws {
         var message = TLWriter()
         message.writeInt32(Int32(bitPattern: 0x3ae56482)) // message
@@ -1064,6 +1180,20 @@ final class NativeStackTests: XCTestCase {
         try await store.clearUpdateState(accountID: account.id)
         let clearedState = try await store.loadUpdateState(accountID: account.id)
         XCTAssertNil(clearedState)
+
+        let firstChannelState = NativeChannelUpdateState(channelID: 100, pts: 10)
+        let secondChannelState = NativeChannelUpdateState(channelID: 200, pts: 20)
+        try await store.saveChannelUpdateState(firstChannelState, accountID: account.id)
+        try await store.saveChannelUpdateState(secondChannelState, accountID: account.id)
+        try await store.saveChannelUpdateState(NativeChannelUpdateState(channelID: 100, pts: 11), accountID: account.id)
+        let channelStates = try await store.loadChannelUpdateStates(accountID: account.id)
+        XCTAssertEqual(channelStates[100]?.pts, 11)
+        XCTAssertEqual(channelStates[200], secondChannelState)
+
+        try await store.clearChannelUpdateState(channelID: 100, accountID: account.id)
+        let clearedChannelStates = try await store.loadChannelUpdateStates(accountID: account.id)
+        XCTAssertNil(clearedChannelStates[100])
+        XCTAssertEqual(clearedChannelStates[200], secondChannelState)
     }
 
     func testStoreRejectsInvalidSessionKey() async throws {

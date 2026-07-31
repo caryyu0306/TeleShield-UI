@@ -11,7 +11,7 @@ SwiftUI Views
     ↓
 @MainActor CoreClient
     ↓
-ProtectionCoordinator actor（updates.getDifference cursor、fail-closed）→ SpamRuleEngine
+ProtectionCoordinator actor（common PTS + per-channel PTS、fail-closed）→ SpamRuleEngine
     ↓
 TelegramAPI actor
     ↓
@@ -30,7 +30,7 @@ CoreClient → TeleShieldStore actor → JSON files + Keychain
 - `ContentView.swift`、`DashboardViews.swift`、`ModerationViews.swift`、`SettingsAndAccountViews.swift`：按 app shell、dashboard、moderation 與 settings/accounts 分層的 SwiftUI 畫面。
 - `CoreClient.swift`：UI 狀態協調，不直接處理 binary protocol。
 - `TeleShieldStore.swift`：帳號隔離、atomic persistence、Keychain credentials/session。
-- `TelegramAPI.swift`、`TelegramOperations.swift`、`TelegramUpdates.swift`：登入、SRP、dialogs、history、更新 cursor、封鎖與群組操作。
+- `TelegramAPI.swift`、`TelegramOperations.swift`、`TelegramUpdates.swift`：登入、SRP、dialogs、history、common `updates.getDifference`、每個頻道／超級群組的 `updates.getChannelDifference`、封鎖與群組操作。
 - `MTProtoClient.swift`、`MTProtoCrypto.swift`、`MTProtoTransport.swift`、`TLCodec.swift`：原生 MTProto stack。
 - `ProtectionCoordinator.swift`、`SpamRuleEngine.swift`：即時防護、歷史掃描與規則判斷。
 
@@ -40,7 +40,7 @@ MTProto 實作依 Telegram 官方的 [MTProto 2.0 說明](https://core.telegram.
 
 - Telegram 驗證碼登入與兩步驟密碼（SRP）
 - 私訊封鎖、管理員群組成員移除
-- 即時背景防護與歷史掃描
+- 即時背景防護與歷史掃描；common account cursor 與每個 channel/supergroup PTS 分開持久化
 - 白名單、黑名單、學習關鍵字與 regex 規則
 - 封鎖記錄、報告、群組設定與 JSON／CSV 匯入／匯出
 - 每個 Telegram 帳號獨立的 session、設定、名單與記錄
@@ -95,10 +95,10 @@ CI 會在完整 Xcode 的 Intel `macos-15-intel` 與 Apple Silicon `macos-14` ru
 TELESHIELD_DATA_DIR="$PWD/.local-teleshield-data" swift run --package-path swiftui TeleShieldApp
 ```
 
-API hash、電話與 auth key 儲存在 macOS Keychain；非敏感設定與歷史記錄存於帳號隔離的 JSON 檔案。不要把 session、API credentials、驗證碼、2FA 密碼或真實 log 加入 Git。
+API hash、電話與 auth key 儲存在 macOS Keychain；非敏感設定、common `updates.json`、channel `channel_updates.json` 與歷史記錄存於帳號隔離的 JSON 檔案。不要把 session、API credentials、驗證碼、2FA 密碼或真實 log 加入 Git。
 
 ## 安全注意事項
 
 TeleShield 使用個人帳號 MTProto，不是 Bot API。請只在自己控制的帳號與群組使用，並先以 dry-run 檢查封鎖／移除結果。登出、刪除帳號資料、封鎖與群組移除都是 destructive operation。
 
-本 fork 目前仍是測試版，已在原生層處理常見的 Telegram `*_MIGRATE_X` RPC、檔案 DC 回復路徑，以及以持久化 `updates.getDifference` cursor 驅動的背景同步；`differenceTooLong` 會安全重新建立 baseline，不會自動回溯處理歷史。尚未宣稱完成 Apple Developer signing、notarization、所有 Telegram DC／CDN failover、完整 Layer 223 TL constructor 覆蓋或真實 Telegram 帳號的端到端驗收。更新 response 遇到未支援 constructor 時會 fail-closed 並保留 cursor；OCR 支援可下載的照片訊息，不支援的媒體與 constructor 會安全跳過。
+本 fork 目前仍是測試版，已在原生層處理常見的 Telegram `*_MIGRATE_X` RPC、檔案 DC 回復路徑，以及以持久化 common `updates.getDifference` 與每個 channel/supergroup 的 `updates.getChannelDifference` 驅動背景同步；common `differenceTooLong` 與 channel `channelDifferenceTooLong` 都會安全重新建立各自 baseline，不會自動回溯處理無法確認的歷史缺口。尚未宣稱完成 Apple Developer signing、notarization、所有 Telegram DC／CDN failover、完整 Layer 223 TL constructor 覆蓋或真實 Telegram 帳號的端到端驗收。更新 response 遇到未支援 constructor 時會 fail-closed 並保留對應 cursor；OCR 支援可下載的照片訊息，不支援的媒體與 constructor 會安全跳過。

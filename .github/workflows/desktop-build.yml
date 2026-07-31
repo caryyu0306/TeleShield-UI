@@ -148,9 +148,9 @@ jobs:
           echo "Runner architecture: $actual_arch"
           test "$actual_arch" = "$EXPECTED_ARCH"
       - name: Install Tesseract runtime dependencies
-        run: brew install tesseract tesseract-lang dylibbundler
+        run: brew install tesseract tesseract-lang dylibbundler zlib jpeg-turbo
       - name: Install sidecar dependencies
-        run: python -m pip install -r requirements-sidecar.txt
+        run: scripts/install_sidecar_dependencies.sh
       - name: Bundle Chinese/English Tesseract runtime
         run: scripts/bundle_tesseract_macos.sh build/tesseract-runtime
       - name: Build SwiftUI application bundle

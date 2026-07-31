@@ -422,6 +422,71 @@ final class NativeStackTests: XCTestCase {
         XCTAssertEqual(reader.remaining, 0)
     }
 
+    func testChannelParticipantResponseConsumesAuxiliaryVectors() async throws {
+        let authKey = Data((0..<256).map { UInt8($0 & 0xff) })
+        let session = NativeSession(dcID: 2, authKey: authKey, userID: 7, serverSalt: 11, date: Date())
+
+        var response = TLWriter()
+        response.writeInt32(Int32(bitPattern: 0xdfb80317)) // channels.channelParticipant
+        response.writeInt32(Int32(bitPattern: 0x2fe601d3)) // channelParticipantCreator
+        response.writeInt32(0) // flags
+        response.writeInt64(42) // user_id
+        response.writeInt32(Int32(bitPattern: 0x5fb224d5)) // chatAdminRights
+        response.writeInt32(0)
+        response.writeVector([Int32]()) { _, _ in }
+        response.writeVector([Int32]()) { _, _ in }
+
+        let transport = RecordingMTProtoTransport(authKey: authKey, resultBodies: [response.data], sessionID: 94)
+        let api = TelegramAPI(apiID: 123, apiHash: "fixture", session: session, transport: transport, sessionID: 94)
+        let user = NativeUser(id: 42, accessHash: 123, firstName: "Admin", lastName: "", username: "", phone: nil, isSelf: false, isBot: false)
+        let chat = NativeChat(id: 9001, accessHash: 456, title: "Fixture group", username: "fixture", isChannel: true, isBroadcast: false, isMegagroup: true, adminRights: true)
+
+        let isAdministrator = try await api.isAdministrator(user, in: chat)
+        XCTAssertTrue(isAdministrator)
+        let sendCount = await transport.sendCount
+        XCTAssertEqual(sendCount, 1)
+    }
+
+    func testBasicGroupParticipantResponseConsumesFullChatShape() async throws {
+        let authKey = Data((0..<256).map { UInt8($0 & 0xff) })
+        let session = NativeSession(dcID: 2, authKey: authKey, userID: 7, serverSalt: 11, date: Date())
+
+        var response = TLWriter()
+        response.writeInt32(Int32(bitPattern: 0xe5d7d19c)) // messages.chatFull
+        response.writeInt32(Int32(bitPattern: 0x2633421b)) // chatFull
+        response.writeInt32(1 << 18) // flags: available_reactions
+        response.writeInt64(9001) // id
+        try response.writeString("") // about
+        response.writeInt32(Int32(bitPattern: 0x3cbc93f8)) // chatParticipants
+        response.writeInt64(9001) // chat_id
+        response.writeVector([Int32(42)]) { writer, _ in
+            writer.writeInt32(Int32(bitPattern: 0x360d5d2)) // chatParticipantAdmin
+            writer.writeInt32(0) // flags
+            writer.writeInt64(42) // user_id
+            writer.writeInt64(7) // inviter_id
+            writer.writeInt32(1_700_000_000)
+        }
+        response.writeInt32(1) // participants version
+        response.writeInt32(-1721619444) // peerNotifySettings
+        response.writeInt32(0)
+        response.writeInt32(Int32(bitPattern: 0x661d4037)) // chatReactionsSome
+        response.writeVector([Int32(1)]) { writer, _ in
+            writer.writeInt32(Int32(bitPattern: 0x523da4eb)) // reactionPaid
+        }
+        response.writeVector([Int32]()) { _, _ in } // chats
+        response.writeVector([Int32]()) { _, _ in } // users
+
+        let transport = RecordingMTProtoTransport(authKey: authKey, resultBodies: [response.data], sessionID: 95)
+        let api = TelegramAPI(apiID: 123, apiHash: "fixture", session: session, transport: transport, sessionID: 95)
+        let user = NativeUser(id: 42, accessHash: 123, firstName: "Admin", lastName: "", username: "", phone: nil, isSelf: false, isBot: false)
+        let chat = NativeChat(id: 9001, accessHash: nil, title: "Fixture basic group", username: "", isChannel: false, isBroadcast: false, isMegagroup: false, adminRights: true)
+
+        let isAdministrator = try await api.isAdministrator(user, in: chat)
+        XCTAssertTrue(isAdministrator)
+        let sendCount = await transport.sendCount
+        XCTAssertEqual(sendCount, 1)
+    }
+
     func testTelegramDifferenceFixtureConsumesMessagesAndOtherUpdates() async throws {
         var message = TLWriter()
         message.writeInt32(Int32(bitPattern: 0x3ae56482)) // message

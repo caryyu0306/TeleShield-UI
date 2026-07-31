@@ -55,6 +55,13 @@ extension TelegramAPI {
             throw TelegramAPIError.invalidResponse
         }
         let isAdministrator = try readChannelParticipant(&reader, targetUserID: user.id)
+        // channels.channelParticipant contains the participant followed by
+        // auxiliary chats/users vectors.  They are not needed for the
+        // authorization decision, but must be consumed before validating the
+        // response boundary; otherwise every real response is rejected as
+        // trailing garbage and group protection always fails closed.
+        _ = try readChatVector(&reader)
+        _ = try readUserVector(&reader)
         guard reader.remaining == 0 else { throw TelegramAPIError.invalidResponse }
         return isAdministrator
     }

@@ -105,7 +105,7 @@ extension TelegramAPI {
         guard try reader.readInt32() == Int32(bitPattern: 0x2633421b) else {
             throw TelegramAPIError.invalidResponse
         }
-        _ = try reader.readInt32() // chatFull flags
+        let fullChatFlags = try reader.readInt32()
         _ = try reader.readInt64()
         _ = try reader.readString()
         guard try reader.readInt32() == Int32(bitPattern: 0x3cbc93f8) else {
@@ -113,6 +113,7 @@ extension TelegramAPI {
             // removable; the caller will skip the destructive action.
             throw TelegramAPIError.invalidResponse
         }
+        _ = try reader.readInt64() // chat_id
         var isAdministrator = false
         _ = try reader.readVector { reader in
             switch try reader.readInt32() {
@@ -140,6 +141,30 @@ extension TelegramAPI {
             return ()
         }
         _ = try reader.readInt32() // participants version
+        if fullChatFlags & 4 != 0 { try skipChatPhoto(&reader) }
+        try skipPeerNotifySettings(&reader)
+        if fullChatFlags & (1 << 13) != 0 { try skipExportedChatInvite(&reader) }
+        if fullChatFlags & (1 << 3) != 0 {
+            _ = try reader.readVector { reader in
+                try skipBotInfo(&reader)
+                return ()
+            }
+        }
+        if fullChatFlags & (1 << 6) != 0 { _ = try reader.readInt32() }
+        if fullChatFlags & (1 << 11) != 0 { _ = try reader.readInt32() }
+        if fullChatFlags & (1 << 12) != 0 { try skipInputGroupCall(&reader) }
+        if fullChatFlags & (1 << 14) != 0 { _ = try reader.readInt32() }
+        if fullChatFlags & (1 << 15) != 0 { _ = try readPeer(&reader) }
+        if fullChatFlags & (1 << 16) != 0 { _ = try reader.readString() }
+        if fullChatFlags & (1 << 17) != 0 {
+            _ = try reader.readInt32()
+            _ = try reader.readVector { reader in try reader.readInt64() }
+        }
+        if fullChatFlags & (1 << 18) != 0 { try skipChatReactions(&reader) }
+        if fullChatFlags & (1 << 20) != 0 { _ = try reader.readInt32() }
+        // messages.chatFull returns auxiliary chats/users after full_chat.
+        _ = try readChatVector(&reader)
+        _ = try readUserVector(&reader)
         guard reader.remaining == 0 else { throw TelegramAPIError.invalidResponse }
         return isAdministrator
     }
@@ -807,6 +832,109 @@ extension TelegramAPI {
             _ = try reader.readString()
         case 0x8c10603f:
             _ = try reader.readInt32()
+        default:
+            throw TelegramAPIError.invalidResponse
+        }
+    }
+
+    private func skipExportedChatInvite(_ reader: inout TLReader) throws {
+        switch UInt32(bitPattern: try reader.readInt32()) {
+        case 0xed107ab7: // chatInvitePublicJoinRequests
+            return
+        case 0xa22cbd96: // chatInviteExported
+            let flags = try reader.readInt32()
+            _ = try reader.readString()
+            _ = try reader.readInt64()
+            _ = try reader.readInt32()
+            if flags & (1 << 4) != 0 { _ = try reader.readInt32() }
+            if flags & (1 << 1) != 0 { _ = try reader.readInt32() }
+            if flags & (1 << 2) != 0 { _ = try reader.readInt32() }
+            if flags & (1 << 3) != 0 { _ = try reader.readInt32() }
+            if flags & (1 << 7) != 0 { _ = try reader.readInt32() }
+            if flags & (1 << 10) != 0 { _ = try reader.readInt32() }
+            if flags & (1 << 8) != 0 { _ = try reader.readString() }
+            if flags & (1 << 9) != 0 {
+                guard UInt32(bitPattern: try reader.readInt32()) == 0x05416d58 else {
+                    throw TelegramAPIError.invalidResponse
+                }
+                _ = try reader.readInt32()
+                _ = try reader.readInt64()
+            }
+        default:
+            throw TelegramAPIError.invalidResponse
+        }
+    }
+
+    private func skipBotInfo(_ reader: inout TLReader) throws {
+        guard UInt32(bitPattern: try reader.readInt32()) == 0x4d8a0299 else {
+            throw TelegramAPIError.invalidResponse
+        }
+        let flags = try reader.readInt32()
+        if flags & 1 != 0 { _ = try reader.readInt64() }
+        if flags & 2 != 0 { _ = try reader.readString() }
+        if flags & 16 != 0 { try skipPhoto(&reader) }
+        if flags & 32 != 0 { try skipDocument(&reader) }
+        if flags & 4 != 0 {
+            _ = try reader.readVector { reader in
+                guard UInt32(bitPattern: try reader.readInt32()) == 0xc27ac8c7 else {
+                    throw TelegramAPIError.invalidResponse
+                }
+                _ = try reader.readString()
+                _ = try reader.readString()
+                return ()
+            }
+        }
+        if flags & 8 != 0 { try skipBotMenuButton(&reader) }
+        if flags & 128 != 0 { _ = try reader.readString() }
+        if flags & 256 != 0 { try skipBotAppSettings(&reader) }
+        if flags & 512 != 0 { try skipBotVerifierSettings(&reader) }
+    }
+
+    private func skipBotMenuButton(_ reader: inout TLReader) throws {
+        switch UInt32(bitPattern: try reader.readInt32()) {
+        case 0x7533a588, 0x4258c205:
+            return
+        case 0xc7b57ce6:
+            _ = try reader.readString()
+            _ = try reader.readString()
+        default:
+            throw TelegramAPIError.invalidResponse
+        }
+    }
+
+    private func skipBotAppSettings(_ reader: inout TLReader) throws {
+        guard UInt32(bitPattern: try reader.readInt32()) == 0xc99b1950 else {
+            throw TelegramAPIError.invalidResponse
+        }
+        let flags = try reader.readInt32()
+        if flags & 1 != 0 { _ = try reader.readBytes() }
+        if flags & 2 != 0 { _ = try reader.readInt32() }
+        if flags & 4 != 0 { _ = try reader.readInt32() }
+        if flags & 8 != 0 { _ = try reader.readInt32() }
+        if flags & 16 != 0 { _ = try reader.readInt32() }
+    }
+
+    private func skipBotVerifierSettings(_ reader: inout TLReader) throws {
+        guard UInt32(bitPattern: try reader.readInt32()) == 0xb0cd6617 else {
+            throw TelegramAPIError.invalidResponse
+        }
+        let flags = try reader.readInt32()
+        _ = try reader.readInt64()
+        _ = try reader.readString()
+        if flags & 1 != 0 { _ = try reader.readString() }
+    }
+
+    private func skipChatReactions(_ reader: inout TLReader) throws {
+        switch UInt32(bitPattern: try reader.readInt32()) {
+        case 0xeafc32bc: // chatReactionsNone
+            return
+        case 0x52928bca: // chatReactionsAll
+            _ = try reader.readInt32()
+        case 0x661d4037: // chatReactionsSome
+            _ = try reader.readVector { reader in
+                try skipReaction(&reader)
+                return ()
+            }
         default:
             throw TelegramAPIError.invalidResponse
         }
@@ -1857,6 +1985,8 @@ extension TelegramAPI {
             _ = try reader.readString()
         case -1992950669:
             _ = try reader.readInt64()
+        case Int32(bitPattern: 0x523da4eb): // reactionPaid
+            break
         default:
             throw TelegramAPIError.invalidResponse
         }

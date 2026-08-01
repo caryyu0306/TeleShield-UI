@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import Foundation
 
 guard CommandLine.arguments.count == 2 else {
@@ -11,14 +12,9 @@ try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDir
 
 let sizes: [(Int, String)] = [
     (16, "icon_16x16.png"),
-    (32, "icon_16x16@2x.png"),
     (32, "icon_32x32.png"),
-    (64, "icon_32x32@2x.png"),
     (128, "icon_128x128.png"),
-    (256, "icon_128x128@2x.png"),
     (256, "icon_256x256.png"),
-    (512, "icon_256x256@2x.png"),
-    (512, "icon_512x512.png"),
     (1024, "icon_512x512@2x.png")
 ]
 
@@ -76,7 +72,20 @@ func renderIcon(size: Int) -> Data {
     )
     emoji.draw(at: emojiOrigin, withAttributes: attributes)
 
-    guard let png = representation.representation(using: .png, properties: [:]) else {
+    guard let ciImage = CIImage(bitmapImageRep: representation),
+          let posterize = CIFilter(name: "CIColorPosterize") else {
+        fatalError("Unable to prepare high-resolution icon")
+    }
+    posterize.setValue(ciImage, forKey: kCIInputImageKey)
+    posterize.setValue(128.0, forKey: "inputLevels")
+
+    let context = CIContext(options: nil)
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    guard let png = context.pngRepresentation(
+        of: posterize.outputImage!,
+        format: .RGBA8,
+        colorSpace: colorSpace
+    ) else {
         fatalError("Unable to encode icon PNG")
     }
     return png

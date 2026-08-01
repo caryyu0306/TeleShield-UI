@@ -124,6 +124,9 @@ jobs:
           plutil -lint dist/TeleShieldSwiftUI.app/Contents/Info.plist
           test "$(plutil -extract CFBundleIconFiles.0 raw -o - dist/TeleShieldSwiftUI.app/Contents/Info.plist)" = "TeleShield.icns"
           test -s dist/TeleShieldSwiftUI.app/Contents/Resources/TeleShield.icns
+          iconset_dir="$(mktemp -d)/TeleShield.iconset"
+          iconutil -c iconset -o "$iconset_dir" dist/TeleShieldSwiftUI.app/Contents/Resources/TeleShield.icns
+          test -s "$iconset_dir/icon_512x512@2x.png"
           du -sh dist/TeleShieldSwiftUI.app
           du -sh dist/TeleShieldSwiftUI.app/Contents/Helpers/TeleShieldCore
       - name: Create unsigned SwiftUI DMG

@@ -35,7 +35,7 @@ jobs:
         run: python -m pytest -q
 
   macos-swiftui:
-    name: Build SwiftUI ${{ matrix.artifact_name }}
+    name: Build SwiftUI ${{ matrix.artifact_name }} (${{ matrix.expected_arch }})
     needs: tests
     strategy:
       fail-fast: false
@@ -79,11 +79,16 @@ jobs:
       - name: Verify helper architecture and self-test
         env:
           TELESHIELD_DATA_DIR: ${{ runner.temp }}/teleshield-data
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
         run: |
           APP="dist/TeleShieldSwiftUI.app"
           CORE="$APP/Contents/Helpers/TeleShieldCore/TeleShieldCore"
-          lipo -archs "$APP/Contents/MacOS/TeleShieldApp"
-          lipo -archs "$CORE"
+          app_arch="$(lipo -archs "$APP/Contents/MacOS/TeleShieldApp")"
+          helper_arch="$(lipo -archs "$CORE")"
+          echo "SwiftUI app architecture: $app_arch"
+          echo "Sidecar architecture: $helper_arch"
+          test "$app_arch" = "$EXPECTED_ARCH"
+          test "$helper_arch" = "$EXPECTED_ARCH"
           "$CORE" --self-test
           printf '%s\n' \
             '{"id":1,"method":"get_status"}' \

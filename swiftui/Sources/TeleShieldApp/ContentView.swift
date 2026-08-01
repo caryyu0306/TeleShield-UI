@@ -937,14 +937,14 @@ private struct AccountDetailsSettingsView: View {
                             testingNotification = true
                             notificationTestStatus = "正在發送測試通知…"
                             Task {
-                                let sent = await client.testTelegramNotification(
+                                let testError = await client.testTelegramNotification(
                                     botToken: botToken,
                                     channelID: channelID
                                 )
                                 testingNotification = false
-                                notificationTestStatus = sent
-                                    ? "測試通知已發送，請確認頻道是否收到訊息。"
-                                    : "測試失敗，請確認 Bot Token、Channel ID 與頻道權限。"
+                                notificationTestStatus = testError.map {
+                                    "測試失敗：\($0)"
+                                } ?? "測試通知已發送，請確認頻道是否收到訊息。"
                             }
                         } label: {
                             Label("測試通知", systemImage: "paperplane")
@@ -959,7 +959,11 @@ private struct AccountDetailsSettingsView: View {
                     if !notificationTestStatus.isEmpty {
                         Text(notificationTestStatus)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(
+                                notificationTestStatus.hasPrefix("測試失敗")
+                                    ? Color.red
+                                    : Color.secondary
+                            )
                     }
                     if !notificationSaveStatus.isEmpty {
                         Text(notificationSaveStatus)

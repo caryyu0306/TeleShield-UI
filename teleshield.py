@@ -15,7 +15,7 @@ Telegram 廣告封鎖工具 — TeleShield 完整版
   --group-scan                                 掃描群組並踢除廣告
 """
 
-import asyncio, csv, errno, json, os, random, re, shutil, sys, tempfile, threading, time
+import asyncio, csv, errno, json, os, random, re, shutil, ssl, sys, tempfile, threading, time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +29,11 @@ from typing import Optional
 from uuid import uuid4
 from telethon import events
 from collections import defaultdict
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - requirements include certifi for packaged builds
+    certifi = None
 
 # ──────────── 設定 ────────────
 
@@ -1160,6 +1165,13 @@ def _telegram_api_error_message(payload: str) -> str:
     return "Telegram Bot API 回傳錯誤"
 
 
+def _telegram_ssl_context() -> ssl.SSLContext:
+    """Use a bundled CA set so the frozen Python sidecar can verify HTTPS."""
+    if certifi is not None:
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
+
+
 def send_telegram_bot_message(
     bot_token: str,
     channel_id: str,
@@ -1183,7 +1195,11 @@ def send_telegram_bot_message(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout,
+            context=_telegram_ssl_context(),
+        ) as response:
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

@@ -407,9 +407,10 @@ def test_telegram_notification_formats_and_sends_bot_api_message(monkeypatch, tm
         def read(self):
             return b'{"ok":true,"result":{"message_id":7}}'
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         captured["request"] = request
         captured["timeout"] = timeout
+        captured["context"] = context
         return FakeResponse()
 
     monkeypatch.setattr(teleshield.urllib.request, "urlopen", fake_urlopen)
@@ -418,6 +419,7 @@ def test_telegram_notification_formats_and_sends_bot_api_message(monkeypatch, tm
 
     assert result == {"sent": True}
     assert captured["timeout"] == teleshield.TELEGRAM_BOT_API_TIMEOUT
+    assert isinstance(captured["context"], teleshield.ssl.SSLContext)
     assert captured["request"].full_url.endswith("/bot123456:ABC/sendMessage")
     payload = teleshield.urllib.parse.parse_qs(captured["request"].data.decode("utf-8"))
     assert payload["chat_id"] == ["-1001234567890"]

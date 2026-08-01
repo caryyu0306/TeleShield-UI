@@ -500,7 +500,7 @@ final class CoreClient: ObservableObject {
         }
     }
 
-    func testTelegramNotification(botToken: String, channelID: String) async -> Bool {
+    func testTelegramNotification(botToken: String, channelID: String) async -> String? {
         do {
             let data = try await request(
                 method: "test_telegram_notification",
@@ -512,11 +512,14 @@ final class CoreClient: ObservableObject {
             let result = try decodeResult(TelegramNotificationTestResult.self, from: data)
             if result.sent {
                 appendLog("Telegram 通知測試成功", level: "info")
+                return nil
             }
-            return result.sent
+            let error = CoreClientError(message: "Telegram API 未發送測試通知")
+            present(error: error)
+            return error.localizedDescription
         } catch {
             present(error: error)
-            return false
+            return error.localizedDescription
         }
     }
 

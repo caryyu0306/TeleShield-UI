@@ -324,7 +324,7 @@ private struct EventLogCard: View {
                                 .lineLimit(2)
                         }
                         Spacer()
-                        Text(record.time.replacingOccurrences(of: "T", with: " "))
+                        Text(record.displayTime)
                             .font(.caption2.monospaced())
                             .foregroundStyle(.tertiary)
                     }
@@ -688,7 +688,7 @@ private struct BlockRecordsView: View {
             }
             List(client.blockRecords) { record in
                 HStack(alignment: .top, spacing: 12) {
-                    Text(record.time.replacingOccurrences(of: "T", with: " ")).font(.caption.monospaced()).frame(width: 175, alignment: .leading)
+                    Text(record.displayTime).font(.caption.monospaced()).frame(width: 175, alignment: .leading)
                     Text(record.source == "group" ? "群組" : "私訊").font(.caption.bold()).foregroundStyle(record.source == "group" ? .orange : .blue).frame(width: 45, alignment: .leading)
                     Text(record.userID).font(.caption.monospaced()).frame(width: 100, alignment: .leading)
                     Text(record.name).fontWeight(.medium).frame(width: 150, alignment: .leading)

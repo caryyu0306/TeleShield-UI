@@ -348,6 +348,33 @@ struct ListEntry: Codable, Identifiable {
     }
 }
 
+enum TimestampFormatter {
+    private static let fractionalISO8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let ISO8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static func localString(_ rawValue: String, timeZone: TimeZone = .autoupdatingCurrent) -> String {
+        let normalized = rawValue.replacingOccurrences(of: " ", with: "T")
+        guard let date = fractionalISO8601.date(from: normalized) ?? ISO8601.date(from: normalized) else {
+            return rawValue.replacingOccurrences(of: "T", with: " ")
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+}
+
 struct BlockRecord: Codable, Identifiable {
     let time: String
     let source: String
@@ -356,6 +383,7 @@ struct BlockRecord: Codable, Identifiable {
     let reason: String
 
     var id: String { "\(time)-\(userID)-\(name)" }
+    var displayTime: String { TimestampFormatter.localString(time) }
 
     enum CodingKeys: String, CodingKey {
         case time

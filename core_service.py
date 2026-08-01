@@ -200,6 +200,8 @@ class CoreService:
             "clear_session": self._clear_session,
             "get_scan_settings": self._get_scan_settings,
             "update_scan_settings": self._update_scan_settings,
+            "get_moderation_policy": self._get_moderation_policy,
+            "update_moderation_policy": self._update_moderation_policy,
             "start_scan": self._start_scan,
             "cancel_scan": self._cancel_scan,
             "shutdown": self._shutdown,
@@ -340,6 +342,20 @@ class CoreService:
     def _runtime(self, account_id: str | None) -> ListenerRuntime | None:
         return self._listeners.get(self._listener_key(account_id))
 
+    def _scan_is_running(self, account_id: str | None) -> bool:
+        scan_key = self._listener_key(account_id)
+        with self._lock:
+            job_id = self._scan_jobs.get(scan_key)
+            job = self._jobs.get(job_id) if job_id else None
+        return bool(job and job[0].is_alive())
+
+    def _assert_account_idle(self, account_id: str | None) -> None:
+        runtime = self._runtime(account_id)
+        if runtime and runtime.running:
+            raise RuntimeError("請先停止此帳號的即時防護")
+        if self._scan_is_running(account_id):
+            raise RuntimeError("請先停止此帳號的歷史掃描")
+
     def _safe_account_record(self, record: dict[str, Any]) -> dict[str, Any]:
         allowed = (
             "id",
@@ -439,9 +455,7 @@ class CoreService:
         account_id = self._resolve_account_id(params)
         if not account_id:
             raise InvalidRequestError("account_id 不可為空")
-        runtime = self._runtime(account_id)
-        if runtime and runtime.running:
-            raise RuntimeError("請先停止此帳號的即時防護")
+        self._assert_account_idle(account_id)
         removed = self.core.remove_account(
             account_id,
             delete_files=self._coerce_bool(params.get("delete_files"), True),
@@ -463,6 +477,15 @@ class CoreService:
         else:
             auto_start = bool(cfg.get("auto_start_protection"))
         auto_start_account_id = auto_start_account_ids[0] if auto_start_account_ids else None
+        get_policy = getattr(self.core, "get_moderation_policy", None)
+        moderation_policy = (
+            get_policy(account_id=account_id)
+            if callable(get_policy)
+            else {
+                "delete_private_history_after_block": False,
+                "delete_private_history_scope": "self",
+            }
+        )
         return {
             "account_id": account_id,
             "logged_in": bool(cfg.get("user_id")),
@@ -473,6 +496,7 @@ class CoreService:
             "auto_start": auto_start,
             "auto_start_account_id": auto_start_account_id,
             "auto_start_account_ids": auto_start_account_ids,
+            "moderation_policy": moderation_policy,
         }
 
     def _get_startup_status(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -671,6 +695,8 @@ class CoreService:
 
     def _start_protection(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
+        if self._scan_is_running(account_id):
+            raise RuntimeError("請先停止此帳號的歷史掃描")
         key = self._listener_key(account_id)
         with self._lock:
             current = self._listeners.get(key)
@@ -890,6 +916,27 @@ class CoreService:
             account_id=self._resolve_account_id(params),
         )
 
+    def _get_moderation_policy(self, params: dict[str, Any]) -> dict[str, Any]:
+        get_policy = getattr(self.core, "get_moderation_policy", None)
+        if not callable(get_policy):
+            return {
+                "delete_private_history_after_block": False,
+                "delete_private_history_scope": "self",
+            }
+        return get_policy(account_id=self._resolve_account_id(params))
+
+    def _update_moderation_policy(self, params: dict[str, Any]) -> dict[str, Any]:
+        updates = params.get("updates") or {}
+        if not isinstance(updates, dict):
+            raise InvalidRequestError("updates 必須是 JSON object")
+        update_policy = getattr(self.core, "update_moderation_policy", None)
+        if not callable(update_policy):
+            raise InvalidRequestError("目前核心不支援帳號級防護政策")
+        return update_policy(
+            updates,
+            account_id=self._resolve_account_id(params),
+        )
+
     def _start_async_job(
         self,
         operation: Callable[[], Any],
@@ -957,9 +1004,7 @@ class CoreService:
 
     def _logout(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        runtime = self._runtime(account_id)
-        if runtime and runtime.running:
-            raise RuntimeError("請先停止此帳號的即時防護")
+        self._assert_account_idle(account_id)
         remove_credentials = self._coerce_bool(params.get("remove_credentials"))
         return self._start_async_job(
             lambda: self.core.logout_account(remove_credentials, account_id=account_id),
@@ -970,9 +1015,7 @@ class CoreService:
 
     def _clear_session(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        runtime = self._runtime(account_id)
-        if runtime and runtime.running:
-            raise RuntimeError("請先停止此帳號的即時防護")
+        self._assert_account_idle(account_id)
         self.core.clear_local_session(
             remove_credentials=self._coerce_bool(params.get("remove_credentials")),
             account_id=account_id,
@@ -981,6 +1024,9 @@ class CoreService:
 
     def _start_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
+        runtime = self._runtime(account_id)
+        if runtime and runtime.running:
+            raise RuntimeError("請先停止此帳號的即時防護")
         scan_key = self._listener_key(account_id)
         with self._lock:
             existing_id = self._scan_jobs.get(scan_key)

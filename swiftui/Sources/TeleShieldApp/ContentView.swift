@@ -9,10 +9,18 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case reports = "報告"
     case records = "封鎖記錄"
     case groups = "群組管理"
-    case settings = "設定"
+    case settings = "全域設定"
     case accounts = "帳號"
 
     var id: String { rawValue }
+
+    static var workspaceCases: [AppSection] {
+        [.overview, .protection, .lists, .rules, .reports, .records, .groups]
+    }
+
+    static var managementCases: [AppSection] {
+        [.accounts, .settings]
+    }
     var icon: String {
         switch self {
         case .overview: return "rectangle.3.group"
@@ -93,7 +101,14 @@ struct ContentView: View {
             }
 
             Section("工作區") {
-                ForEach(AppSection.allCases) { item in
+                ForEach(AppSection.workspaceCases) { item in
+                    Label(item.rawValue, systemImage: item.icon)
+                        .tag(item)
+                }
+            }
+
+            Section("管理") {
+                ForEach(AppSection.managementCases) { item in
                     Label(item.rawValue, systemImage: item.icon)
                         .tag(item)
                 }
@@ -128,7 +143,7 @@ struct ContentView: View {
         case .reports: ReportView(client: client)
         case .records: BlockRecordsView(client: client)
         case .groups: GroupsView(client: client)
-        case .settings: SettingsView(client: client)
+        case .settings: GlobalSettingsView(client: client)
         case .accounts: AccountsView(client: client, showLogin: $showLogin)
         }
     }
@@ -309,7 +324,7 @@ private struct EventLogCard: View {
                                 .lineLimit(2)
                         }
                         Spacer()
-                        Text(record.time.replacingOccurrences(of: "T", with: " "))
+                        Text(record.displayTime)
                             .font(.caption2.monospaced())
                             .foregroundStyle(.tertiary)
                     }
@@ -673,7 +688,7 @@ private struct BlockRecordsView: View {
             }
             List(client.blockRecords) { record in
                 HStack(alignment: .top, spacing: 12) {
-                    Text(record.time.replacingOccurrences(of: "T", with: " ")).font(.caption.monospaced()).frame(width: 175, alignment: .leading)
+                    Text(record.displayTime).font(.caption.monospaced()).frame(width: 175, alignment: .leading)
                     Text(record.source == "group" ? "群組" : "私訊").font(.caption.bold()).foregroundStyle(record.source == "group" ? .orange : .blue).frame(width: 45, alignment: .leading)
                     Text(record.userID).font(.caption.monospaced()).frame(width: 100, alignment: .leading)
                     Text(record.name).fontWeight(.medium).frame(width: 150, alignment: .leading)
@@ -727,16 +742,12 @@ private struct GroupsView: View {
     }
 }
 
-private struct SettingsView: View {
+private struct GlobalSettingsView: View {
     @ObservedObject var client: CoreClient
-    @State private var settings = ScanSettings.defaults
-    @State private var showLogoutConfirmation = false
-    @State private var showClearConfirmation = false
-    @State private var showClearCredentialsConfirmation = false
 
     var body: some View {
         Form {
-            Section("啟動與防護") {
+            Section("開機啟動") {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle("登入系統時自動啟動 TeleShield", isOn: Binding<Bool>(get: { client.startupEnabled }, set: { value in Task { await client.setStartup(value) } }))
                     Toggle("啟用自動啟動防護", isOn: Binding<Bool>(
@@ -760,21 +771,14 @@ private struct SettingsView: View {
                         .help(account.configured ? account.accountIdentifier : "尚未登入")
                         .disabled(!account.configured)
                     }
-                    Text("關閉視窗只會隱藏到 Menu Bar，不會停止防護；要停止請使用防護頁或 Menu Bar。")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Section("歷史掃描限制") {
-                ScanStepper(title: "私訊對話數", value: $settings.privateDialogLimit, range: 1...100)
-                ScanStepper(title: "每個私訊訊息數", value: $settings.privateMessageLimit, range: 1...100)
-                ScanStepper(title: "私訊日期範圍", value: $settings.privateDays, range: 1...365)
-                ScanStepper(title: "群組數", value: $settings.groupDialogLimit, range: 1...100)
-                ScanStepper(title: "每個群組訊息數", value: $settings.groupMessageLimit, range: 1...100)
-                ScanStepper(title: "群組日期範圍", value: $settings.groupDays, range: 1...365)
-                Button("儲存掃描設定") { Task { await client.updateScanSettings(settings) } }
-                    .buttonStyle(.borderedProminent)
+            Section("App 行為") {
+                Text("關閉視窗只會隱藏到 Menu Bar，不會停止防護；要停止請使用防護頁或 Menu Bar。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            Section("OCR") {
+            Section("OCR runtime 狀態") {
                 HStack {
                     Label(client.status?.ocr.available == true ? "OCR 可用" : "OCR 尚未可用", systemImage: "text.viewfinder")
                     Spacer()
@@ -782,35 +786,9 @@ private struct SettingsView: View {
                     Button("重新檢查") { Task { await client.refreshOCR() } }
                 }
             }
-            Section("Telegram Session") {
-                Button("登出 Telegram（保留 API 設定）", role: .destructive) { showLogoutConfirmation = true }
-                    .disabled(!client.canModifySelectedAccount)
-                Button("只刪除本機 Session", role: .destructive) { showClearConfirmation = true }
-                    .disabled(!client.canModifySelectedAccount)
-                Button("刪除 Session 與 API 設定", role: .destructive) { showClearCredentialsConfirmation = true }
-                    .disabled(!client.canModifySelectedAccount)
-                Text("這些操作只作用於目前選取帳號；即時防護執行中時會被鎖定。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
         .padding(20)
-        .task {
-            await client.refreshAccountData()
-            settings = client.scanSettings
-        }
-        .confirmationDialog("登出目前 Telegram 帳號？", isPresented: $showLogoutConfirmation, titleVisibility: .visible) {
-            Button("確認登出", role: .destructive) { Task { await client.logout(removeCredentials: false) } }
-            Button("取消", role: .cancel) {}
-        } message: { Text("API 設定會保留，但 Session 會失效，需要再次登入。") }
-        .confirmationDialog("刪除本機 Session？", isPresented: $showClearConfirmation, titleVisibility: .visible) {
-            Button("確認刪除", role: .destructive) { Task { await client.clearSession(removeCredentials: false) } }
-            Button("取消", role: .cancel) {}
-        }
-        .confirmationDialog("刪除 Session 與 API 設定？", isPresented: $showClearCredentialsConfirmation, titleVisibility: .visible) {
-            Button("確認全部刪除", role: .destructive) { Task { await client.clearSession(removeCredentials: true) } }
-            Button("取消", role: .cancel) {}
-        }
     }
 
     private var clientAutoStartAccountIDs: Set<String> {
@@ -843,10 +821,201 @@ private struct ScanStepper: View {
     }
 }
 
+private struct AccountDetailsSettingsView: View {
+    @ObservedObject var client: CoreClient
+    let accountID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var policy = ModerationPolicy.defaults
+    @State private var scanSettings = ScanSettings.defaults
+    @State private var pendingEnablePolicy: ModerationPolicy?
+    @State private var pendingScope: PrivateHistoryDeletionScope?
+    @State private var showEnableConfirmation = false
+    @State private var showBothScopeConfirmation = false
+    @State private var showLogoutConfirmation = false
+    @State private var showClearConfirmation = false
+    @State private var showClearCredentialsConfirmation = false
+
+    private var account: AccountSummary? {
+        client.status?.accounts.first(where: { $0.id == accountID })
+    }
+
+    private var sessionActionsDisabled: Bool {
+        client.selectedAccountID != accountID || !client.canModifySelectedAccount
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("帳號") {
+                    if let account {
+                        LabeledContent("名稱", value: account.label)
+                        LabeledContent("手機", value: account.phoneMasked.isEmpty ? "未提供" : account.phoneMasked)
+                        LabeledContent("Telegram ID", value: account.userID.map(String.init) ?? "未登入")
+                        HStack {
+                            Text("防護狀態")
+                            Spacer()
+                            AccountStatusBadge(account: account)
+                        }
+                    } else {
+                        Text("帳號資料載入中…").foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("防護政策") {
+                    Toggle(
+                        "封鎖後自動刪除一對一私訊",
+                        isOn: Binding(
+                            get: { policy.deletePrivateHistoryAfterBlock },
+                            set: { enabled in
+                                if enabled {
+                                    pendingEnablePolicy = ModerationPolicy(
+                                        deletePrivateHistoryAfterBlock: true,
+                                        deletePrivateHistoryScope: policy.deletePrivateHistoryScope
+                                    )
+                                    showEnableConfirmation = true
+                                } else {
+                                    persistPolicy(ModerationPolicy(
+                                        deletePrivateHistoryAfterBlock: false,
+                                        deletePrivateHistoryScope: policy.deletePrivateHistoryScope
+                                    ))
+                                }
+                            }
+                        )
+                    )
+
+                    Picker(
+                        "刪除範圍",
+                        selection: Binding(
+                            get: { policy.deletePrivateHistoryScope },
+                            set: { scope in
+                                guard scope != policy.deletePrivateHistoryScope else { return }
+                                if scope == .both {
+                                    pendingScope = scope
+                                    showBothScopeConfirmation = true
+                                } else {
+                                    persistPolicy(ModerationPolicy(
+                                        deletePrivateHistoryAfterBlock: policy.deletePrivateHistoryAfterBlock,
+                                        deletePrivateHistoryScope: scope
+                                    ))
+                                }
+                            }
+                        )
+                    ) {
+                        ForEach(PrivateHistoryDeletionScope.allCases) { scope in
+                            Text(scope.title).tag(scope)
+                        }
+                    }
+                    .disabled(!policy.deletePrivateHistoryAfterBlock)
+
+                    Text("只套用於一對一私訊；群組與頻道不會刪除。試運行永遠不會執行刪除。封鎖成功後才會嘗試刪除，刪除失敗不會取消封鎖。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("掃描設定") {
+                    ScanStepper(title: "私訊對話數", value: $scanSettings.privateDialogLimit, range: 1...100)
+                    ScanStepper(title: "每個私訊訊息數", value: $scanSettings.privateMessageLimit, range: 1...100)
+                    ScanStepper(title: "私訊日期範圍", value: $scanSettings.privateDays, range: 1...365)
+                    ScanStepper(title: "群組數", value: $scanSettings.groupDialogLimit, range: 1...100)
+                    ScanStepper(title: "每個群組訊息數", value: $scanSettings.groupMessageLimit, range: 1...100)
+                    ScanStepper(title: "群組日期範圍", value: $scanSettings.groupDays, range: 1...365)
+                    Button("儲存掃描設定") {
+                        Task { await client.updateScanSettings(scanSettings, accountID: accountID) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                Section("Telegram Session") {
+                    HStack {
+                        Text("Session 狀態")
+                        Spacer()
+                        Text(client.details?.loggedIn == true ? "已登入" : "未登入")
+                            .foregroundStyle(client.details?.loggedIn == true ? .green : .secondary)
+                    }
+                    HStack {
+                        Text("API 設定")
+                        Spacer()
+                        Text(client.details?.hasAPICredentials == true ? "已設定" : "未設定")
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("登出 Telegram（保留 API 設定）", role: .destructive) { showLogoutConfirmation = true }
+                        .disabled(sessionActionsDisabled)
+                    Button("只清除本機 Session", role: .destructive) { showClearConfirmation = true }
+                        .disabled(sessionActionsDisabled)
+                    Button("刪除 Session 與 API 設定", role: .destructive) { showClearCredentialsConfirmation = true }
+                        .disabled(sessionActionsDisabled)
+                    Text("這些操作只作用於此帳號；即時防護或歷史掃描執行中時會被鎖定。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("帳號詳細設定")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .frame(minWidth: 620, minHeight: 650)
+        .task(id: accountID) {
+            await client.refreshAccountData(accountID: accountID)
+            guard client.selectedAccountID == accountID else { return }
+            policy = client.moderationPolicy
+            scanSettings = client.scanSettings
+        }
+        .confirmationDialog("開啟封鎖後刪除私訊？", isPresented: $showEnableConfirmation, titleVisibility: .visible) {
+            Button("確認開啟", role: .destructive) {
+                if let pendingEnablePolicy { persistPolicy(pendingEnablePolicy) }
+                pendingEnablePolicy = nil
+            }
+            Button("取消", role: .cancel) { pendingEnablePolicy = nil }
+        } message: {
+            Text("只會對之後成功封鎖的一對一私訊生效；群組、頻道與試運行不會刪除。")
+        }
+        .confirmationDialog("確認嘗試從雙方刪除？", isPresented: $showBothScopeConfirmation, titleVisibility: .visible) {
+            Button("確認使用雙方刪除", role: .destructive) {
+                if let pendingScope {
+                    persistPolicy(ModerationPolicy(
+                        deletePrivateHistoryAfterBlock: policy.deletePrivateHistoryAfterBlock,
+                        deletePrivateHistoryScope: pendingScope
+                    ))
+                }
+                pendingScope = nil
+            }
+            Button("取消", role: .cancel) { pendingScope = nil }
+        } message: {
+            Text("Telegram 可能因權限、對話類型或時間限制無法刪除雙方紀錄；目前帳號仍會保留封鎖結果。")
+        }
+        .confirmationDialog("登出此 Telegram 帳號？", isPresented: $showLogoutConfirmation, titleVisibility: .visible) {
+            Button("確認登出", role: .destructive) { Task { await client.logout(removeCredentials: false) } }
+            Button("取消", role: .cancel) {}
+        } message: { Text("API 設定會保留，但 Session 會失效，需要再次登入。") }
+        .confirmationDialog("刪除本機 Session？", isPresented: $showClearConfirmation, titleVisibility: .visible) {
+            Button("確認刪除", role: .destructive) { Task { await client.clearSession(removeCredentials: false) } }
+            Button("取消", role: .cancel) {}
+        }
+        .confirmationDialog("刪除 Session 與 API 設定？", isPresented: $showClearCredentialsConfirmation, titleVisibility: .visible) {
+            Button("確認全部刪除", role: .destructive) { Task { await client.clearSession(removeCredentials: true) } }
+            Button("取消", role: .cancel) {}
+        }
+    }
+
+    private func persistPolicy(_ nextPolicy: ModerationPolicy) {
+        policy = nextPolicy
+        Task {
+            await client.updateModerationPolicy(nextPolicy, accountID: accountID)
+            await client.refreshAccountData(accountID: accountID)
+            if client.selectedAccountID == accountID { policy = client.moderationPolicy }
+        }
+    }
+}
+
 private struct AccountsView: View {
     @ObservedObject var client: CoreClient
     @Binding var showLogin: Bool
     @State private var removalAccountID: String?
+    @State private var detailsAccount: AccountSummary?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -856,8 +1025,21 @@ private struct AccountsView: View {
             }
             List(client.status?.accounts ?? []) { account in
                 HStack(spacing: 12) {
-                    AccountRow(account: account, selected: client.selectedAccount?.id == account.id)
+                    Button {
+                        Task { await client.selectAccount(account.id) }
+                    } label: {
+                        AccountRow(account: account, selected: client.selectedAccount?.id == account.id)
+                    }
+                    .buttonStyle(.plain)
                     Spacer()
+                    Button("帳號詳細設定") {
+                        Task {
+                            await client.selectAccount(account.id)
+                            if client.selectedAccountID == account.id {
+                                detailsAccount = account
+                            }
+                        }
+                    }
                     Button(account.configured ? "重新登入" : "登入") {
                         Task { await client.selectAccount(account.id); showLogin = true }
                     }
@@ -865,10 +1047,8 @@ private struct AccountsView: View {
                     Button("移除", role: .destructive) {
                         removalAccountID = account.id
                     }
-                    .disabled(account.running || client.isBusy)
+                    .disabled(client.isBusy || (client.selectedAccount?.id == account.id && client.hasActiveScan))
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { Task { await client.selectAccount(account.id) } }
             }
             .listStyle(.inset)
         }
@@ -876,13 +1056,25 @@ private struct AccountsView: View {
         .confirmationDialog("移除帳號？", isPresented: Binding(get: { removalAccountID != nil }, set: { if !$0 { removalAccountID = nil } }), titleVisibility: .visible) {
             Button("確認移除全部本機資料", role: .destructive) {
                 if let accountID = removalAccountID {
-                    Task { _ = await client.removeAccount(accountID) }
+                    Task {
+                        if client.selectedAccount?.id == accountID,
+                           client.selectedAccount?.running == true {
+                            await client.stopProtection()
+                        } else if client.status?.accounts.first(where: { $0.id == accountID })?.running == true {
+                            await client.selectAccount(accountID)
+                            await client.stopProtection()
+                        }
+                        _ = await client.removeAccount(accountID)
+                    }
                 }
                 removalAccountID = nil
             }
             Button("取消", role: .cancel) { removalAccountID = nil }
         } message: {
-            Text("會刪除所選帳號的 Session、設定、名單、群組與封鎖記錄；其他帳號不受影響。")
+            Text("若此帳號正在防護，會先停止防護，再刪除它的 Session、設定、名單、群組與封鎖記錄；其他帳號不受影響。")
+        }
+        .sheet(item: $detailsAccount) { account in
+            AccountDetailsSettingsView(client: client, accountID: account.id)
         }
     }
 }
@@ -1267,4 +1459,3 @@ private func savePanel(fileExtension: String, name: String) -> URL? {
     panel.allowedFileTypes = [fileExtension]
     return panel.runModal() == .OK ? panel.url : nil
 }
-

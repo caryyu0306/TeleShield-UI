@@ -215,6 +215,12 @@ private struct HistoryScanViewPage: View {
                 ) {
                     EmptyView()
                 }
+                Label(
+                    "請先關閉防護才能掃描；防護與掃描使用同一個 Telegram Session，無法同時執行。",
+                    systemImage: "info.circle"
+                )
+                .font(.callout)
+                .foregroundStyle(.orange)
                 if let account = client.selectedAccount, account.configured {
                     HistoryScanView(client: client)
                 } else {

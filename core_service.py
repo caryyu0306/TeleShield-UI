@@ -950,7 +950,11 @@ class CoreService:
             raise InvalidRequestError("目前核心不支援 Telegram 通知測試")
         bot_token = str(params.get("bot_token") or "").strip()
         channel_id = str(params.get("channel_id") or "").strip()
-        return tester(bot_token, channel_id)
+        return tester(
+            bot_token,
+            channel_id,
+            account_id=self._resolve_account_id(params),
+        )
 
     def _start_async_job(
         self,

@@ -280,8 +280,8 @@ class FakeParityCore(FakeCore):
         self.calls.append(("update_moderation_policy", dict(updates), account_id))
         return dict(current)
 
-    def test_telegram_notification(self, bot_token, channel_id):
-        self.calls.append(("test_telegram_notification", bot_token, channel_id))
+    def test_telegram_notification(self, bot_token, channel_id, account_id=None):
+        self.calls.append(("test_telegram_notification", bot_token, channel_id, account_id))
         return {"sent": bool(bot_token and channel_id)}
 
     def import_list_entries(self, path, list_type, replace=False, account_id=None):
@@ -369,9 +369,18 @@ def test_account_details_exposes_global_auto_start_and_omits_credentials():
 
     assert service.dispatch(
         "test_telegram_notification",
-        {"bot_token": "123456:ABC", "channel_id": "-1001234567890"},
+        {
+            "account_id": "account-a",
+            "bot_token": "123456:ABC",
+            "channel_id": "-1001234567890",
+        },
     ) == {"sent": True}
-    assert ("test_telegram_notification", "123456:ABC", "-1001234567890") in core.calls
+    assert (
+        "test_telegram_notification",
+        "123456:ABC",
+        "-1001234567890",
+        "account-a",
+    ) in core.calls
 
 
 def test_moderation_policy_rpc_is_explicitly_account_scoped():

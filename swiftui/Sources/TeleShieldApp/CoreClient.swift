@@ -499,14 +499,22 @@ final class CoreClient: ObservableObject {
         }
     }
 
-    func testTelegramNotification(botToken: String, channelID: String) async -> String? {
+    func testTelegramNotification(
+        botToken: String,
+        channelID: String,
+        accountID: String? = nil
+    ) async -> String? {
+        var params: [String: JSONValue] = [
+            "bot_token": .string(botToken),
+            "channel_id": .string(channelID),
+        ]
+        if let accountID, !accountID.isEmpty {
+            params["account_id"] = .string(accountID)
+        }
         do {
             let data = try await request(
                 method: "test_telegram_notification",
-                params: [
-                    "bot_token": .string(botToken),
-                    "channel_id": .string(channelID),
-                ]
+                params: params
             )
             let result = try decodeResult(TelegramNotificationTestResult.self, from: data)
             if result.sent {

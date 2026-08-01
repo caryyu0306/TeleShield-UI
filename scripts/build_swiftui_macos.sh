@@ -15,9 +15,13 @@ python -m PyInstaller \
   --clean \
   --console \
   --name TeleShieldCore \
+  --additional-hooks-dir "${ROOT_DIR}/scripts/pyinstaller-hooks" \
   --collect-data opencc \
   --add-data "build/tesseract-runtime:tesseract-runtime" \
   core_service.py
+
+python "${ROOT_DIR}/scripts/dedupe_macos_dylibs.py" "$SIDECAR_DIR"
+python "${ROOT_DIR}/scripts/verify_pillow_codecs.py" "$SIDECAR_DIR"
 
 swift build --package-path swiftui -c release
 

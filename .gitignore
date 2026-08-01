@@ -11,6 +11,7 @@ config.json
 # Build outputs
 build/
 dist/
+build-artifacts/
 *.spec
 swiftui/.build/
 swiftui/.swiftpm/

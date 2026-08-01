@@ -7,10 +7,11 @@ cd "$ROOT_DIR"
 APP_NAME="TeleShieldSwiftUI"
 APP_DIR="${ROOT_DIR}/dist/${APP_NAME}.app"
 SIDECAR_DIR="${ROOT_DIR}/dist/TeleShieldCore"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 rm -rf "$APP_DIR" "$SIDECAR_DIR"
 
-python -m PyInstaller \
+"$PYTHON_BIN" -m PyInstaller \
   --noconfirm \
   --clean \
   --console \
@@ -20,8 +21,8 @@ python -m PyInstaller \
   --add-data "build/tesseract-runtime:tesseract-runtime" \
   core_service.py
 
-python "${ROOT_DIR}/scripts/dedupe_macos_dylibs.py" "$SIDECAR_DIR"
-python "${ROOT_DIR}/scripts/verify_pillow_codecs.py" "$SIDECAR_DIR"
+"$PYTHON_BIN" "${ROOT_DIR}/scripts/dedupe_macos_dylibs.py" "$SIDECAR_DIR"
+"$PYTHON_BIN" "${ROOT_DIR}/scripts/verify_pillow_codecs.py" "$SIDECAR_DIR"
 
 swift build --package-path swiftui -c release
 

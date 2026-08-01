@@ -166,6 +166,68 @@ def test_scan_history_private_dry_run_reports_match_without_blocking(monkeypatch
     assert FakeClient.delete_requests == 0
 
 
+def test_scan_history_paginates_and_filters_before_private_dialog_limit(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_config({
+        "api_id": 1234,
+        "api_hash": "[REDACTED]",
+        "user_id": 1,
+        "blocked_count": 0,
+        "whitelist": {},
+        "blacklist": {},
+    }, account_id="account-a")
+
+    contact = User(id=3, is_self=False, bot=False, first_name="Contact")
+    spammer = User(id=2, is_self=False, bot=False, first_name="Spam")
+    group_dialogs = [SimpleNamespace(entity=SimpleNamespace()) for _ in range(35)]
+    dialogs = [
+        *group_dialogs,
+        SimpleNamespace(entity=contact),
+        # The folder marker represents an archived dialog. The scanner should
+        # still reach it after skipping unrelated dialogs.
+        SimpleNamespace(entity=spammer, folder=1),
+    ]
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def iter_dialogs(self, limit=None):
+            assert limit is None
+            for dialog in dialogs:
+                yield dialog
+
+        async def get_messages(self, entity, limit):
+            assert entity is spammer
+            return [SimpleNamespace(
+                date=datetime.now(timezone.utc),
+                text="投資穩賺，立即加入",
+                photo=None,
+            )]
+
+        async def __call__(self, request):
+            return SimpleNamespace(users=[contact])
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        result = asyncio.run(
+            teleshield.scan_history("private", dry_run=True, account_id="account-a")
+        )
+
+    assert result["account_id"] == "account-a"
+    assert result["dialogs_seen"] == len(dialogs)
+    assert result["dialogs_scanned"] == 1
+    assert result["matched"] == 1
+
+
 def test_scan_history_private_applies_block_and_records_result(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     teleshield.save_config({
@@ -599,6 +661,27 @@ def test_sidecar_learned_patterns_are_used_by_spam_enforcement(monkeypatch, tmp_
     )
 
     assert teleshield.is_spam("這是 side-only 廣告", teleshield.load_config("account-a")) is True
+
+
+def test_spam_matching_can_use_explicit_account_scope(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.create_account("account-b")
+    teleshield.save_config({"learned_patterns": {"keywords": [], "patterns": []}}, "account-a")
+    teleshield.save_config({"learned_patterns": {"keywords": [], "patterns": []}}, "account-b")
+    teleshield.save_learned_patterns(
+        {"keywords": ["account-a-only"], "patterns": []},
+        account_id="account-a",
+    )
+    teleshield.set_active_account("account-b")
+
+    account_a_cfg = teleshield.load_config("account-a")
+    assert teleshield.is_spam(
+        "這是 account-a-only 廣告",
+        account_a_cfg,
+        account_id="account-a",
+    ) is True
+    assert teleshield.is_spam("這是 account-a-only 廣告", account_a_cfg) is False
 
 
 def test_build_report_returns_structured_summary_and_trend(monkeypatch, tmp_path):

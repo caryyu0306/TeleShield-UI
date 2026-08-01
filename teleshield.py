@@ -16,6 +16,9 @@ Telegram 廣告封鎖工具 — TeleShield 完整版
 """
 
 import asyncio, csv, errno, json, os, random, re, shutil, sys, tempfile, threading, time
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -939,7 +942,14 @@ DEFAULT_SCAN_SETTINGS = {
 DEFAULT_MODERATION_POLICY = {
     "delete_private_history_after_block": False,
     "delete_private_history_scope": "self",
+    "telegram_notification": {
+        "enabled": False,
+        "bot_token": "",
+        "channel_id": "",
+    },
 }
+
+TELEGRAM_BOT_API_TIMEOUT = 15
 
 MODERATION_POLICY_SCOPES = {"self", "both"}
 
@@ -1089,6 +1099,9 @@ def get_moderation_policy(cfg: dict = None, account_id: Optional[str] = None) ->
     )
     if scope not in MODERATION_POLICY_SCOPES:
         scope = DEFAULT_MODERATION_POLICY["delete_private_history_scope"]
+    notification = stored.get("telegram_notification", {})
+    if not isinstance(notification, dict):
+        notification = {}
     return {
         "delete_private_history_after_block": _coerce_config_bool(
             stored.get(
@@ -1097,6 +1110,11 @@ def get_moderation_policy(cfg: dict = None, account_id: Optional[str] = None) ->
             )
         ),
         "delete_private_history_scope": scope,
+        "telegram_notification": {
+            "enabled": _coerce_config_bool(notification.get("enabled"), False),
+            "bot_token": str(notification.get("bot_token") or "").strip(),
+            "channel_id": str(notification.get("channel_id") or "").strip(),
+        },
     }
 
 
@@ -1115,9 +1133,164 @@ def update_moderation_policy(updates: dict, account_id: Optional[str] = None) ->
         if scope not in MODERATION_POLICY_SCOPES:
             raise ValueError("delete_private_history_scope 必須是 self 或 both")
         policy["delete_private_history_scope"] = scope
+    if "telegram_notification" in updates:
+        notification_updates = updates["telegram_notification"]
+        if not isinstance(notification_updates, dict):
+            raise ValueError("telegram_notification 必須是 JSON object")
+        notification = dict(policy["telegram_notification"])
+        if "enabled" in notification_updates:
+            notification["enabled"] = _coerce_config_bool(notification_updates["enabled"])
+        if "bot_token" in notification_updates:
+            notification["bot_token"] = str(notification_updates["bot_token"] or "").strip()
+        if "channel_id" in notification_updates:
+            notification["channel_id"] = str(notification_updates["channel_id"] or "").strip()
+        policy["telegram_notification"] = notification
     cfg["moderation_policy"] = policy
     save_config(cfg, account_id)
     return policy
+
+
+def _telegram_api_error_message(payload: str) -> str:
+    try:
+        decoded = json.loads(payload)
+    except (TypeError, ValueError):
+        decoded = None
+    if isinstance(decoded, dict) and decoded.get("description"):
+        return str(decoded["description"])
+    return "Telegram Bot API 回傳錯誤"
+
+
+def send_telegram_bot_message(
+    bot_token: str,
+    channel_id: str,
+    text: str,
+    timeout: int = TELEGRAM_BOT_API_TIMEOUT,
+) -> dict:
+    """Send one message through the Telegram Bot API without exposing credentials."""
+    bot_token = str(bot_token or "").strip()
+    channel_id = str(channel_id or "").strip()
+    if not bot_token:
+        raise ValueError("Bot Token 不可為空")
+    if not channel_id:
+        raise ValueError("Channel ID 不可為空")
+
+    endpoint = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = urllib.parse.urlencode({"chat_id": channel_id, "text": text}).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Telegram Bot API 請求失敗：{_telegram_api_error_message(body)}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Telegram Bot API 連線失敗：{exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError("Telegram Bot API 連線逾時") from exc
+
+    try:
+        result = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Telegram Bot API 回傳格式無效") from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise RuntimeError(
+            f"Telegram Bot API 請求失敗：{_telegram_api_error_message(raw)}"
+        )
+    return result
+
+
+def test_telegram_notification(bot_token: str, channel_id: str) -> dict:
+    """Send a test message to validate the Bot Token and Channel ID."""
+    send_telegram_bot_message(
+        bot_token,
+        channel_id,
+        "✅ TeleShield 測試通知\n\nBot Token 與 Channel ID 已成功驗證。",
+    )
+    return {"sent": True}
+
+
+def _format_notification_time(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    local = value.astimezone()
+    raw_offset = local.strftime("%z")
+    offset = f"{raw_offset[:3]}:{raw_offset[3:]}" if len(raw_offset) == 5 else raw_offset
+    return f"{local.strftime('%Y-%m-%d %H:%M:%S')} {offset}"
+
+
+def build_telegram_block_notification(
+    user_id: int,
+    name: str,
+    reason: str,
+    deletion: Optional[dict],
+    block_time: Optional[datetime] = None,
+) -> str:
+    """Build the stable notification text sent after a private block."""
+    block_time = block_time or datetime.now(timezone.utc)
+    display_name = " ".join(str(name or "").split()) or "未知名稱"
+    display_reason = " ".join(str(reason or "未記錄原因").split())[:1000]
+    delete_enabled = deletion is not None
+    if deletion is None:
+        deletion_status = "未執行"
+    else:
+        deletion_status = "是" if deletion.get("succeeded") else "否"
+    return "\n".join(
+        [
+            "🚫 TeleShield 封鎖通知",
+            "",
+            f"封鎖名稱 & ID: {display_name} ({user_id})",
+            f"封鎖原因: {display_reason}",
+            f"封鎖時間: {_format_notification_time(block_time)}",
+            f"是否開啟刪除對話: {'是' if delete_enabled else '否'}",
+            f"是否已經刪除對話: {deletion_status}",
+        ]
+    )
+
+
+async def _notify_telegram_after_block(
+    user_id: int,
+    name: str,
+    reason: str,
+    deletion: Optional[dict],
+    cfg: Optional[dict],
+    block_time: datetime,
+) -> dict:
+    policy = get_moderation_policy(cfg)
+    notification_policy = policy["telegram_notification"]
+    result = {
+        "enabled": bool(notification_policy["enabled"]),
+        "sent": False,
+    }
+    if not result["enabled"]:
+        return result
+    if not notification_policy["bot_token"] or not notification_policy["channel_id"]:
+        result["error"] = "Bot Token 或 Channel ID 未設定"
+        return result
+
+    message = build_telegram_block_notification(
+        user_id,
+        name,
+        reason,
+        deletion,
+        block_time=block_time,
+    )
+    try:
+        await asyncio.to_thread(
+            send_telegram_bot_message,
+            notification_policy["bot_token"],
+            notification_policy["channel_id"],
+            message,
+        )
+        result["sent"] = True
+    except Exception as exc:
+        # Notification failures must never roll back or hide a successful block.
+        result["error"] = str(exc)[:200]
+    return result
 
 
 def learn_text(text: str, account_id: Optional[str] = None) -> dict:
@@ -1495,14 +1668,18 @@ def log_block(
     reason: str,
     source: str = "private",
     details: Optional[dict] = None,
+    timestamp: Optional[datetime] = None,
 ):
     log = load_block_log()
+    timestamp = timestamp or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
     record = {
         "user_id": user_id,
         "name": name,
         "reason": reason[:200],
         "source": source,
-        "time": datetime.now(timezone.utc).isoformat(),
+        "time": timestamp.isoformat(),
     }
     if details:
         record["details"] = details
@@ -1546,9 +1723,29 @@ async def block_private_user(
     from telethon.tl.functions.contacts import BlockRequest
 
     await client(BlockRequest(id=entity.id))
+    block_time = datetime.now(timezone.utc)
     deletion = await delete_private_history_after_block(client, entity, cfg)
-    details = {"private_history_deletion": deletion} if deletion else None
-    log_block(entity.id, name, reason, source, details=details)
+    notification = await _notify_telegram_after_block(
+        entity.id,
+        name,
+        reason,
+        deletion,
+        cfg,
+        block_time,
+    )
+    details = {}
+    if deletion:
+        details["private_history_deletion"] = deletion
+    if notification["enabled"]:
+        details["telegram_notification"] = notification
+    log_block(
+        entity.id,
+        name,
+        reason,
+        source,
+        details=details or None,
+        timestamp=block_time,
+    )
     return deletion
 
 def ocr_image(image_path: str) -> str:
@@ -1760,7 +1957,13 @@ async def _authenticate(
         cfg.setdefault("managed_groups", [])
         cfg.setdefault("learned_patterns", {"keywords": [], "patterns": []})
         cfg.setdefault("scan_settings", DEFAULT_SCAN_SETTINGS.copy())
-        cfg.setdefault("moderation_policy", DEFAULT_MODERATION_POLICY.copy())
+        cfg.setdefault(
+            "moderation_policy",
+            {
+                **DEFAULT_MODERATION_POLICY,
+                "telegram_notification": dict(DEFAULT_MODERATION_POLICY["telegram_notification"]),
+            },
+        )
         cfg.setdefault("listen_scan_groups", True)
         cfg.setdefault("auto_start_protection", False)
         if store.account_id:

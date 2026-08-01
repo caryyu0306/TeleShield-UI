@@ -471,12 +471,17 @@ final class CoreClient: ObservableObject {
         } catch { present(error: error) }
     }
 
-    func updateModerationPolicy(_ policy: ModerationPolicy, accountID: String? = nil) async {
+    func updateModerationPolicy(_ policy: ModerationPolicy, accountID: String? = nil) async -> Bool {
         do {
-            guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else { return }
+            guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else { return false }
             let updates: [String: JSONValue] = [
                 "delete_private_history_after_block": .bool(policy.deletePrivateHistoryAfterBlock),
                 "delete_private_history_scope": .string(policy.deletePrivateHistoryScope.rawValue),
+                "telegram_notification": .object([
+                    "enabled": .bool(policy.telegramNotification.enabled),
+                    "bot_token": .string(policy.telegramNotification.botToken),
+                    "channel_id": .string(policy.telegramNotification.channelID),
+                ]),
             ]
             let data = try await request(
                 method: "update_moderation_policy",
@@ -488,7 +493,31 @@ final class CoreClient: ObservableObject {
             let updated = try decodeResult(ModerationPolicy.self, from: data)
             if selectedAccountID == targetAccountID { moderationPolicy = updated }
             appendLog("防護政策已儲存", level: "info")
-        } catch { present(error: error) }
+            return true
+        } catch {
+            present(error: error)
+            return false
+        }
+    }
+
+    func testTelegramNotification(botToken: String, channelID: String) async -> Bool {
+        do {
+            let data = try await request(
+                method: "test_telegram_notification",
+                params: [
+                    "bot_token": .string(botToken),
+                    "channel_id": .string(channelID),
+                ]
+            )
+            let result = try decodeResult(TelegramNotificationTestResult.self, from: data)
+            if result.sent {
+                appendLog("Telegram 通知測試成功", level: "info")
+            }
+            return result.sent
+        } catch {
+            present(error: error)
+            return false
+        }
     }
 
     func startScan(scope: String, dryRun: Bool) async {

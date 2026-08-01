@@ -208,26 +208,62 @@ enum PrivateHistoryDeletionScope: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+struct TelegramNotificationPolicy: Codable, Equatable {
+    var enabled: Bool
+    var botToken: String
+    var channelID: String
+
+    static let defaults = TelegramNotificationPolicy(
+        enabled: false,
+        botToken: "",
+        channelID: ""
+    )
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case botToken = "bot_token"
+        case channelID = "channel_id"
+    }
+
+    init(enabled: Bool, botToken: String, channelID: String) {
+        self.enabled = enabled
+        self.botToken = botToken
+        self.channelID = channelID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = (try? container.decode(Bool.self, forKey: .enabled)) ?? Self.defaults.enabled
+        botToken = (try? container.decode(String.self, forKey: .botToken)) ?? Self.defaults.botToken
+        channelID = (try? container.decode(String.self, forKey: .channelID)) ?? Self.defaults.channelID
+    }
+}
+
 struct ModerationPolicy: Codable, Equatable {
     var deletePrivateHistoryAfterBlock: Bool
     var deletePrivateHistoryScope: PrivateHistoryDeletionScope
+    var telegramNotification: TelegramNotificationPolicy
 
     static let defaults = ModerationPolicy(
         deletePrivateHistoryAfterBlock: false,
-        deletePrivateHistoryScope: .selfOnly
+        deletePrivateHistoryScope: .selfOnly,
+        telegramNotification: .defaults
     )
 
     enum CodingKeys: String, CodingKey {
         case deletePrivateHistoryAfterBlock = "delete_private_history_after_block"
         case deletePrivateHistoryScope = "delete_private_history_scope"
+        case telegramNotification = "telegram_notification"
     }
 
     init(
         deletePrivateHistoryAfterBlock: Bool,
-        deletePrivateHistoryScope: PrivateHistoryDeletionScope
+        deletePrivateHistoryScope: PrivateHistoryDeletionScope,
+        telegramNotification: TelegramNotificationPolicy
     ) {
         self.deletePrivateHistoryAfterBlock = deletePrivateHistoryAfterBlock
         self.deletePrivateHistoryScope = deletePrivateHistoryScope
+        self.telegramNotification = telegramNotification
     }
 
     init(from decoder: Decoder) throws {
@@ -241,6 +277,10 @@ struct ModerationPolicy: Codable, Equatable {
             forKey: .deletePrivateHistoryScope
         ) ?? Self.defaults.deletePrivateHistoryScope.rawValue
         deletePrivateHistoryScope = PrivateHistoryDeletionScope(rawValue: rawScope) ?? .selfOnly
+        telegramNotification = try container.decodeIfPresent(
+            TelegramNotificationPolicy.self,
+            forKey: .telegramNotification
+        ) ?? Self.defaults.telegramNotification
     }
 }
 
@@ -282,6 +322,10 @@ struct ProtectionActionResult: Codable {
         case ready
         case state
     }
+}
+
+struct TelegramNotificationTestResult: Codable {
+    let sent: Bool
 }
 
 struct AuthStartResult: Codable {

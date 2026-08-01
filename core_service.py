@@ -202,6 +202,7 @@ class CoreService:
             "update_scan_settings": self._update_scan_settings,
             "get_moderation_policy": self._get_moderation_policy,
             "update_moderation_policy": self._update_moderation_policy,
+            "test_telegram_notification": self._test_telegram_notification,
             "start_scan": self._start_scan,
             "cancel_scan": self._cancel_scan,
             "shutdown": self._shutdown,
@@ -484,6 +485,11 @@ class CoreService:
             else {
                 "delete_private_history_after_block": False,
                 "delete_private_history_scope": "self",
+                "telegram_notification": {
+                    "enabled": False,
+                    "bot_token": "",
+                    "channel_id": "",
+                },
             }
         )
         return {
@@ -922,6 +928,11 @@ class CoreService:
             return {
                 "delete_private_history_after_block": False,
                 "delete_private_history_scope": "self",
+                "telegram_notification": {
+                    "enabled": False,
+                    "bot_token": "",
+                    "channel_id": "",
+                },
             }
         return get_policy(account_id=self._resolve_account_id(params))
 
@@ -936,6 +947,14 @@ class CoreService:
             updates,
             account_id=self._resolve_account_id(params),
         )
+
+    def _test_telegram_notification(self, params: dict[str, Any]) -> dict[str, Any]:
+        tester = getattr(self.core, "test_telegram_notification", None)
+        if not callable(tester):
+            raise InvalidRequestError("目前核心不支援 Telegram 通知測試")
+        bot_token = str(params.get("bot_token") or "").strip()
+        channel_id = str(params.get("channel_id") or "").strip()
+        return tester(bot_token, channel_id)
 
     def _start_async_job(
         self,

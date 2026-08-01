@@ -276,6 +276,11 @@ class FakeParityCore(FakeCore):
         return dict(self.policies.get(account_id, {
             "delete_private_history_after_block": False,
             "delete_private_history_scope": "self",
+            "telegram_notification": {
+                "enabled": False,
+                "bot_token": "",
+                "channel_id": "",
+            },
         }))
 
     def update_moderation_policy(self, updates, account_id=None):
@@ -284,6 +289,10 @@ class FakeParityCore(FakeCore):
         self.policies[account_id] = current
         self.calls.append(("update_moderation_policy", dict(updates), account_id))
         return dict(current)
+
+    def test_telegram_notification(self, bot_token, channel_id):
+        self.calls.append(("test_telegram_notification", bot_token, channel_id))
+        return {"sent": bool(bot_token and channel_id)}
 
     def import_list_entries(self, path, list_type, replace=False, account_id=None):
         self.calls.append(("import_list_entries", path, list_type, replace, account_id))
@@ -348,7 +357,8 @@ def test_management_surface_covers_account_rules_groups_exports_and_startup():
 
 
 def test_account_details_exposes_global_auto_start_and_omits_credentials():
-    service = CoreService(core=FakeParityCore(), platform=FakePlatform())
+    core = FakeParityCore()
+    service = CoreService(core=core, platform=FakePlatform())
 
     details = service.dispatch("get_account_details", {"account_id": "account-a"})
 
@@ -361,11 +371,22 @@ def test_account_details_exposes_global_auto_start_and_omits_credentials():
     assert details["moderation_policy"] == {
         "delete_private_history_after_block": False,
         "delete_private_history_scope": "self",
+        "telegram_notification": {
+            "enabled": False,
+            "bot_token": "",
+            "channel_id": "",
+        },
     }
 
     assert service.dispatch("set_auto_start", {"account_ids": ["account-a", "account-b"]}) == {
         "account_ids": ["account-a", "account-b"]
     }
+
+    assert service.dispatch(
+        "test_telegram_notification",
+        {"bot_token": "123456:ABC", "channel_id": "-1001234567890"},
+    ) == {"sent": True}
+    assert ("test_telegram_notification", "123456:ABC", "-1001234567890") in core.calls
 
 
 def test_moderation_policy_rpc_is_explicitly_account_scoped():
@@ -375,6 +396,11 @@ def test_moderation_policy_rpc_is_explicitly_account_scoped():
     assert service.dispatch("get_moderation_policy", {"account_id": "account-a"}) == {
         "delete_private_history_after_block": False,
         "delete_private_history_scope": "self",
+        "telegram_notification": {
+            "enabled": False,
+            "bot_token": "",
+            "channel_id": "",
+        },
     }
     assert service.dispatch(
         "update_moderation_policy",
@@ -383,19 +409,39 @@ def test_moderation_policy_rpc_is_explicitly_account_scoped():
             "updates": {
                 "delete_private_history_after_block": True,
                 "delete_private_history_scope": "both",
+                "telegram_notification": {
+                    "enabled": True,
+                    "bot_token": "123456:ABC",
+                    "channel_id": "-1001234567890",
+                },
             },
         },
     ) == {
         "delete_private_history_after_block": True,
         "delete_private_history_scope": "both",
+        "telegram_notification": {
+            "enabled": True,
+            "bot_token": "123456:ABC",
+            "channel_id": "-1001234567890",
+        },
     }
     assert service.dispatch("get_moderation_policy", {"account_id": "account-a"}) == {
         "delete_private_history_after_block": False,
         "delete_private_history_scope": "self",
+        "telegram_notification": {
+            "enabled": False,
+            "bot_token": "",
+            "channel_id": "",
+        },
     }
     assert ("update_moderation_policy", {
         "delete_private_history_after_block": True,
         "delete_private_history_scope": "both",
+        "telegram_notification": {
+            "enabled": True,
+            "bot_token": "123456:ABC",
+            "channel_id": "-1001234567890",
+        },
     }, "account-b") in core.calls
 
 

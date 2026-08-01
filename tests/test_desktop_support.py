@@ -241,16 +241,31 @@ def test_private_history_policy_is_account_scoped_and_requires_successful_block(
     assert teleshield.get_moderation_policy(account_id="account-a") == {
         "delete_private_history_after_block": False,
         "delete_private_history_scope": "self",
+        "telegram_notification": {
+            "enabled": False,
+            "bot_token": "",
+            "channel_id": "",
+        },
     }
     assert teleshield.update_moderation_policy(
         {
             "delete_private_history_after_block": True,
             "delete_private_history_scope": "both",
+            "telegram_notification": {
+                "enabled": True,
+                "bot_token": "123456:ABC",
+                "channel_id": "-1001234567890",
+            },
         },
         account_id="account-a",
     ) == {
         "delete_private_history_after_block": True,
         "delete_private_history_scope": "both",
+        "telegram_notification": {
+            "enabled": True,
+            "bot_token": "123456:ABC",
+            "channel_id": "-1001234567890",
+        },
     }
     assert teleshield.get_moderation_policy(account_id="account-b")[
         "delete_private_history_after_block"
@@ -376,6 +391,132 @@ def test_private_history_deletion_failure_keeps_block_result_and_is_logged(monke
     assert deletion["succeeded"] is False
     assert deletion["scope"] == "self"
     assert "不允許刪除" in deletion["error"]
+
+
+def test_telegram_notification_formats_and_sends_bot_api_message(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok":true,"result":{"message_id":7}}'
+
+    def fake_urlopen(request, timeout, context=None):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        captured["context"] = context
+        return FakeResponse()
+
+    monkeypatch.setattr(teleshield.urllib.request, "urlopen", fake_urlopen)
+
+    result = teleshield.test_telegram_notification("123456:ABC", "-1001234567890")
+
+    assert result == {"sent": True}
+    assert captured["timeout"] == teleshield.TELEGRAM_BOT_API_TIMEOUT
+    assert isinstance(captured["context"], teleshield.ssl.SSLContext)
+    assert captured["request"].full_url.endswith("/bot123456:ABC/sendMessage")
+    payload = teleshield.urllib.parse.parse_qs(captured["request"].data.decode("utf-8"))
+    assert payload["chat_id"] == ["-1001234567890"]
+    assert "Bot Token 與 Channel ID 已成功驗證。" in payload["text"][0]
+
+
+def test_private_block_notification_includes_deletion_result(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    cfg = {
+        "moderation_policy": {
+            "delete_private_history_after_block": True,
+            "delete_private_history_scope": "self",
+            "telegram_notification": {
+                "enabled": True,
+                "bot_token": "123456:ABC",
+                "channel_id": "-1001234567890",
+            },
+        }
+    }
+    spammer = User(id=42, is_self=False, bot=False, first_name="Spam")
+
+    class FakeClient:
+        async def delete_dialog(self, entity, revoke=False):
+            assert entity is spammer
+            assert revoke is False
+
+        async def __call__(self, request):
+            assert type(request).__name__ == "BlockRequest"
+            return SimpleNamespace()
+
+    with patch.object(teleshield, "send_telegram_bot_message", return_value={"ok": True}) as send:
+        deletion = asyncio.run(
+            teleshield.block_private_user(
+                FakeClient(),
+                spammer,
+                "Spam User",
+                "投資穩賺，立即加入",
+                "private",
+                cfg,
+            )
+        )
+
+    assert deletion == {"requested": True, "scope": "self", "succeeded": True}
+    send.assert_called_once()
+    message = send.call_args.args[2]
+    assert "封鎖名稱 & ID: Spam User (42)" in message
+    assert "封鎖原因: 投資穩賺，立即加入" in message
+    assert "是否開啟刪除對話: 是" in message
+    assert "是否已經刪除對話: 是" in message
+    record = teleshield.load_block_log()["blocks"][0]
+    assert record["details"]["telegram_notification"] == {"enabled": True, "sent": True}
+
+
+def test_telegram_notification_failure_does_not_cancel_private_block(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    cfg = {
+        "moderation_policy": {
+            "delete_private_history_after_block": False,
+            "delete_private_history_scope": "self",
+            "telegram_notification": {
+                "enabled": True,
+                "bot_token": "123456:ABC",
+                "channel_id": "-1001234567890",
+            },
+        }
+    }
+    spammer = User(id=43, is_self=False, bot=False, first_name="Spam")
+
+    class FakeClient:
+        async def __call__(self, request):
+            assert type(request).__name__ == "BlockRequest"
+            return SimpleNamespace()
+
+    with patch.object(
+        teleshield,
+        "send_telegram_bot_message",
+        side_effect=RuntimeError("頻道沒有發送權限"),
+    ):
+        deletion = asyncio.run(
+            teleshield.block_private_user(
+                FakeClient(),
+                spammer,
+                "Spam User",
+                "廣告內容",
+                "private",
+                cfg,
+            )
+        )
+
+    assert deletion is None
+    record = teleshield.load_block_log()["blocks"][0]
+    assert record["user_id"] == 43
+    assert record["details"]["telegram_notification"] == {
+        "enabled": True,
+        "sent": False,
+        "error": "頻道沒有發送權限",
+    }
 
 
 def test_scan_history_group_dry_run_reports_finding_without_kicking(monkeypatch, tmp_path):

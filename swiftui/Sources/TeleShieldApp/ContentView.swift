@@ -826,6 +826,7 @@ private struct AccountDetailsSettingsView: View {
     let accountID: String
     @Environment(\.dismiss) private var dismiss
     @State private var policy = ModerationPolicy.defaults
+    @State private var telegramNotification = TelegramNotificationPolicy.defaults
     @State private var scanSettings = ScanSettings.defaults
     @State private var pendingEnablePolicy: ModerationPolicy?
     @State private var pendingScope: PrivateHistoryDeletionScope?
@@ -834,6 +835,9 @@ private struct AccountDetailsSettingsView: View {
     @State private var showLogoutConfirmation = false
     @State private var showClearConfirmation = false
     @State private var showClearCredentialsConfirmation = false
+    @State private var notificationTestStatus = ""
+    @State private var notificationSaveStatus = ""
+    @State private var testingNotification = false
 
     private var account: AccountSummary? {
         client.status?.accounts.first(where: { $0.id == accountID })
@@ -870,13 +874,15 @@ private struct AccountDetailsSettingsView: View {
                                 if enabled {
                                     pendingEnablePolicy = ModerationPolicy(
                                         deletePrivateHistoryAfterBlock: true,
-                                        deletePrivateHistoryScope: policy.deletePrivateHistoryScope
+                                        deletePrivateHistoryScope: policy.deletePrivateHistoryScope,
+                                        telegramNotification: policy.telegramNotification
                                     )
                                     showEnableConfirmation = true
                                 } else {
                                     persistPolicy(ModerationPolicy(
                                         deletePrivateHistoryAfterBlock: false,
-                                        deletePrivateHistoryScope: policy.deletePrivateHistoryScope
+                                        deletePrivateHistoryScope: policy.deletePrivateHistoryScope,
+                                        telegramNotification: policy.telegramNotification
                                     ))
                                 }
                             }
@@ -895,7 +901,8 @@ private struct AccountDetailsSettingsView: View {
                                 } else {
                                     persistPolicy(ModerationPolicy(
                                         deletePrivateHistoryAfterBlock: policy.deletePrivateHistoryAfterBlock,
-                                        deletePrivateHistoryScope: scope
+                                        deletePrivateHistoryScope: scope,
+                                        telegramNotification: policy.telegramNotification
                                     ))
                                 }
                             }
@@ -908,6 +915,63 @@ private struct AccountDetailsSettingsView: View {
                     .disabled(!policy.deletePrivateHistoryAfterBlock)
 
                     Text("只套用於一對一私訊；群組與頻道不會刪除。試運行永遠不會執行刪除。封鎖成功後才會嘗試刪除，刪除失敗不會取消封鎖。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("封鎖後 Telegram 通知") {
+                    Toggle("啟用封鎖後 Telegram 通知", isOn: $telegramNotification.enabled)
+
+                    SecureField("Bot Token", text: $telegramNotification.botToken)
+                    TextField("Channel ID", text: $telegramNotification.channelID)
+
+                    HStack {
+                        Button("儲存通知設定") {
+                            persistTelegramNotification()
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button {
+                            let botToken = telegramNotification.botToken
+                            let channelID = telegramNotification.channelID
+                            testingNotification = true
+                            notificationTestStatus = "正在發送測試通知…"
+                            Task {
+                                let testError = await client.testTelegramNotification(
+                                    botToken: botToken,
+                                    channelID: channelID
+                                )
+                                testingNotification = false
+                                notificationTestStatus = testError.map {
+                                    "測試失敗：\($0)"
+                                } ?? "測試通知已發送，請確認頻道是否收到訊息。"
+                            }
+                        } label: {
+                            Label("測試通知", systemImage: "paperplane")
+                        }
+                        .disabled(
+                            testingNotification
+                                || telegramNotification.botToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || telegramNotification.channelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
+                    }
+
+                    if !notificationTestStatus.isEmpty {
+                        Text(notificationTestStatus)
+                            .font(.caption)
+                            .foregroundStyle(
+                                notificationTestStatus.hasPrefix("測試失敗")
+                                    ? Color.red
+                                    : Color.secondary
+                            )
+                    }
+                    if !notificationSaveStatus.isEmpty {
+                        Text(notificationSaveStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("只通知私訊封鎖，不通知群組踢除；此開關不會影響帳戶防護啟動。Bot 必須具備在指定頻道發送訊息的權限。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -962,6 +1026,7 @@ private struct AccountDetailsSettingsView: View {
             await client.refreshAccountData(accountID: accountID)
             guard client.selectedAccountID == accountID else { return }
             policy = client.moderationPolicy
+            telegramNotification = client.moderationPolicy.telegramNotification
             scanSettings = client.scanSettings
         }
         .confirmationDialog("開啟封鎖後刪除私訊？", isPresented: $showEnableConfirmation, titleVisibility: .visible) {
@@ -978,7 +1043,8 @@ private struct AccountDetailsSettingsView: View {
                 if let pendingScope {
                     persistPolicy(ModerationPolicy(
                         deletePrivateHistoryAfterBlock: policy.deletePrivateHistoryAfterBlock,
-                        deletePrivateHistoryScope: pendingScope
+                        deletePrivateHistoryScope: pendingScope,
+                        telegramNotification: policy.telegramNotification
                     ))
                 }
                 pendingScope = nil
@@ -1007,6 +1073,26 @@ private struct AccountDetailsSettingsView: View {
             await client.updateModerationPolicy(nextPolicy, accountID: accountID)
             await client.refreshAccountData(accountID: accountID)
             if client.selectedAccountID == accountID { policy = client.moderationPolicy }
+        }
+    }
+
+    private func persistTelegramNotification() {
+        let nextPolicy = ModerationPolicy(
+            deletePrivateHistoryAfterBlock: policy.deletePrivateHistoryAfterBlock,
+            deletePrivateHistoryScope: policy.deletePrivateHistoryScope,
+            telegramNotification: telegramNotification
+        )
+        notificationSaveStatus = "正在儲存通知設定…"
+        Task {
+            let saved = await client.updateModerationPolicy(nextPolicy, accountID: accountID)
+            await client.refreshAccountData(accountID: accountID)
+            if saved, client.selectedAccountID == accountID {
+                policy = client.moderationPolicy
+                telegramNotification = client.moderationPolicy.telegramNotification
+                notificationSaveStatus = "通知設定已儲存。"
+            } else if !saved {
+                notificationSaveStatus = "通知設定儲存失敗。"
+            }
         }
     }
 }

@@ -22,6 +22,10 @@
     <string>1</string>
     <key>CFBundleIconFile</key>
     <string>TeleShield.icns</string>
+    <key>CFBundleIconFiles</key>
+    <array>
+        <string>TeleShield.icns</string>
+    </array>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

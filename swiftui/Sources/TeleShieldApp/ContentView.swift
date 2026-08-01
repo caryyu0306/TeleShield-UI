@@ -1421,10 +1421,15 @@ struct MenuBarView: View {
             Text(client.connectionMessage).font(.caption).foregroundStyle(.secondary)
             Divider()
             Button("開啟 TeleShield") { openMainWindow() }
-            if let account = client.selectedAccount, account.configured {
-                Button(account.running ? "停止防護" : "啟動防護") {
-                    Task { if account.running { await client.stopProtection() } else { await client.startProtection() } }
+            if client.status?.accounts.contains(where: { $0.configured }) == true {
+                Button("啟用全部帳號防護") {
+                    Task { await client.startAll() }
                 }
+                .disabled(client.isBusy)
+                Button("關閉全部帳號防護") {
+                    Task { await client.stopAll() }
+                }
+                .disabled(client.isBusy)
                 Button("重新整理") { Task { await client.refresh() } }
             }
             Button("結束 TeleShield") {

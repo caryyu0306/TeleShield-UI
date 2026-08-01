@@ -936,6 +936,13 @@ DEFAULT_SCAN_SETTINGS = {
     "group_days": 3,
 }
 
+DEFAULT_MODERATION_POLICY = {
+    "delete_private_history_after_block": False,
+    "delete_private_history_scope": "self",
+}
+
+MODERATION_POLICY_SCOPES = {"self", "both"}
+
 SCAN_SETTING_BOUNDS = {
     "private_dialog_limit": (1, 100),
     "private_message_limit": (1, 100),
@@ -1054,6 +1061,63 @@ def update_scan_settings(updates: dict, account_id: Optional[str] = None) -> dic
     cfg["scan_settings"] = settings
     save_config(cfg, account_id)
     return settings
+
+
+def _coerce_config_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "no", "off", "null", "none"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
+
+
+def get_moderation_policy(cfg: dict = None, account_id: Optional[str] = None) -> dict:
+    """Return the account-scoped post-block private-history policy."""
+    cfg = cfg if cfg is not None else load_config(account_id)
+    stored = cfg.get("moderation_policy", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(stored, dict):
+        stored = {}
+    scope = stored.get(
+        "delete_private_history_scope",
+        DEFAULT_MODERATION_POLICY["delete_private_history_scope"],
+    )
+    if scope not in MODERATION_POLICY_SCOPES:
+        scope = DEFAULT_MODERATION_POLICY["delete_private_history_scope"]
+    return {
+        "delete_private_history_after_block": _coerce_config_bool(
+            stored.get(
+                "delete_private_history_after_block",
+                DEFAULT_MODERATION_POLICY["delete_private_history_after_block"],
+            )
+        ),
+        "delete_private_history_scope": scope,
+    }
+
+
+def update_moderation_policy(updates: dict, account_id: Optional[str] = None) -> dict:
+    """Validate and persist the account-scoped post-block policy."""
+    if not isinstance(updates, dict):
+        raise ValueError("updates 必須是 JSON object")
+    cfg = load_config(account_id)
+    policy = get_moderation_policy(cfg)
+    if "delete_private_history_after_block" in updates:
+        policy["delete_private_history_after_block"] = _coerce_config_bool(
+            updates["delete_private_history_after_block"]
+        )
+    if "delete_private_history_scope" in updates:
+        scope = str(updates["delete_private_history_scope"] or "").strip().lower()
+        if scope not in MODERATION_POLICY_SCOPES:
+            raise ValueError("delete_private_history_scope 必須是 self 或 both")
+        policy["delete_private_history_scope"] = scope
+    cfg["moderation_policy"] = policy
+    save_config(cfg, account_id)
+    return policy
 
 
 def learn_text(text: str, account_id: Optional[str] = None) -> dict:
@@ -1425,19 +1489,67 @@ def is_blacklisted(user_id: int, cfg: dict) -> bool:
 def is_whitelisted(user_id: int, cfg: dict) -> bool:
     return str(user_id) in cfg.get("whitelist", {})
 
-def log_block(user_id: int, name: str, reason: str, source: str = "private"):
+def log_block(
+    user_id: int,
+    name: str,
+    reason: str,
+    source: str = "private",
+    details: Optional[dict] = None,
+):
     log = load_block_log()
-    log["blocks"].append({
+    record = {
         "user_id": user_id,
         "name": name,
         "reason": reason[:200],
         "source": source,
         "time": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    if details:
+        record["details"] = details
+    log["blocks"].append(record)
     # 保留最近 500 筆
     if len(log["blocks"]) > 500:
         log["blocks"] = log["blocks"][-500:]
     save_block_log(log)
+
+
+async def delete_private_history_after_block(client, entity, cfg: Optional[dict] = None) -> Optional[dict]:
+    """Delete one private dialog only after its block request succeeded."""
+    policy = get_moderation_policy(cfg)
+    if not policy["delete_private_history_after_block"]:
+        return None
+    scope = policy["delete_private_history_scope"]
+    result = {
+        "requested": True,
+        "scope": scope,
+        "succeeded": False,
+    }
+    try:
+        await client.delete_dialog(entity, revoke=scope == "both")
+        result["succeeded"] = True
+    except Exception as exc:
+        # The block is intentionally not rolled back. The caller records this
+        # result so the user can see that the cleanup request failed.
+        result["error"] = str(exc)
+    return result
+
+
+async def block_private_user(
+    client,
+    entity,
+    name: str,
+    reason: str,
+    source: str,
+    cfg: Optional[dict] = None,
+) -> Optional[dict]:
+    """Block a private user and then apply the account's cleanup policy."""
+    from telethon.tl.functions.contacts import BlockRequest
+
+    await client(BlockRequest(id=entity.id))
+    deletion = await delete_private_history_after_block(client, entity, cfg)
+    details = {"private_history_deletion": deletion} if deletion else None
+    log_block(entity.id, name, reason, source, details=details)
+    return deletion
 
 def ocr_image(image_path: str) -> str:
     """Extract Chinese/English text when a system or bundled Tesseract exists."""
@@ -1648,6 +1760,7 @@ async def _authenticate(
         cfg.setdefault("managed_groups", [])
         cfg.setdefault("learned_patterns", {"keywords": [], "patterns": []})
         cfg.setdefault("scan_settings", DEFAULT_SCAN_SETTINGS.copy())
+        cfg.setdefault("moderation_policy", DEFAULT_MODERATION_POLICY.copy())
         cfg.setdefault("listen_scan_groups", True)
         cfg.setdefault("auto_start_protection", False)
         if store.account_id:
@@ -1869,6 +1982,8 @@ async def _scan_history(
         "messages_scanned": 0,
         "matched": 0,
         "acted": 0,
+        "private_history_deletions": 0,
+        "private_history_deletions_succeeded": 0,
         "errors": [],
         "findings": [],
         "cancelled": False,
@@ -1957,9 +2072,23 @@ async def _scan_history(
                     if dry_run:
                         break
                     try:
-                        await client(BlockRequest(id=entity.id))
+                        deletion = await block_private_user(
+                            client,
+                            entity,
+                            finding["name"],
+                            reason,
+                            "scan",
+                            cfg,
+                        )
                         result["acted"] += 1
-                        log_block(entity.id, finding["name"], reason, "scan")
+                        if deletion:
+                            result["private_history_deletions"] += 1
+                            if deletion["succeeded"]:
+                                result["private_history_deletions_succeeded"] += 1
+                            else:
+                                add_error(
+                                    f"封鎖成功，但刪除私訊紀錄失敗（{entity.id}）：{deletion.get('error', '未知錯誤')}"
+                                )
                         progress(f"✅ 已封鎖：{finding['name']}")
                     except Exception as exc:
                         add_error(f"封鎖失敗（{entity.id}）：{exc}")
@@ -2144,10 +2273,18 @@ async def scan_and_block(dry_run: bool = False):
                 continue
 
             try:
-                await client(BlockRequest(id=entity.id))
+                deletion = await block_private_user(
+                    client,
+                    entity,
+                    name,
+                    spam_text,
+                    "scan",
+                    cfg,
+                )
                 blocked += 1
-                log_block(entity.id, name, spam_text, "scan")
                 print(f"      ✅ 封鎖")
+                if deletion and not deletion["succeeded"]:
+                    print(f"      ⚠️ 封鎖成功，但刪除私訊紀錄失敗: {deletion.get('error', '未知錯誤')}")
             except Exception as e:
                 print(f"      ❌ 失敗: {e}")
 
@@ -2357,9 +2494,22 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
                     rights = ChatBannedRights(until_date=None, view_messages=True)
                     await client(EditBannedRequest(chat, sender_id, rights))
                 else:
-                    await client(BlockRequest(id=sender_id))
-            except:
-                pass
+                    private_entity = chat if isinstance(chat, User) else sender
+                    name = f"{getattr(private_entity, 'first_name', '') or ''} {getattr(private_entity, 'last_name', '') or ''}".strip()
+                    deletion = await block_private_user(
+                        client,
+                        private_entity,
+                        name or str(sender_id),
+                        "黑名單",
+                        "blacklist",
+                        cfg,
+                    )
+                    cfg["blocked_count"] = cfg.get("blocked_count", 0) + 1
+                    save_config(cfg)
+                    if deletion and not deletion["succeeded"]:
+                        print(f"     ⚠️ 黑名單封鎖成功，但刪除私訊紀錄失敗: {deletion.get('error', '未知錯誤')}")
+            except Exception as exc:
+                print(f"     ❌ 黑名單處理失敗: {exc}")
             return
 
         if is_whitelisted(sender_id, cfg):
@@ -2403,11 +2553,19 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
             print(f"    {spam_text[:100]}")
 
             try:
-                await client(BlockRequest(id=sender_id))
+                deletion = await block_private_user(
+                    client,
+                    sender,
+                    name,
+                    spam_text,
+                    "private",
+                    cfg,
+                )
                 cfg["blocked_count"] = cfg.get("blocked_count", 0) + 1
                 save_config(cfg)
-                log_block(sender_id, name, spam_text, "private")
                 print(f"     ✅ 封鎖（累計 {cfg['blocked_count']}）")
+                if deletion and not deletion["succeeded"]:
+                    print(f"     ⚠️ 封鎖成功，但刪除私訊紀錄失敗: {deletion.get('error', '未知錯誤')}")
             except Exception as e:
                 print(f"     ❌ 封鎖失敗: {e}")
             return

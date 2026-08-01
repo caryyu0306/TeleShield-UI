@@ -233,6 +233,7 @@ class FakeParityCore(FakeCore):
         self.groups = [{"id": "-100", "title": "Announcements", "enabled": True}]
         self.calls = []
         self.auto_start_ids = ["account-a"]
+        self.policies = {}
 
     def create_account(self):
         self.calls.append("create_account")
@@ -270,6 +271,19 @@ class FakeParityCore(FakeCore):
     def update_scan_settings(self, updates, account_id=None):
         self.calls.append(("update_scan_settings", updates, account_id))
         return dict(updates)
+
+    def get_moderation_policy(self, account_id=None):
+        return dict(self.policies.get(account_id, {
+            "delete_private_history_after_block": False,
+            "delete_private_history_scope": "self",
+        }))
+
+    def update_moderation_policy(self, updates, account_id=None):
+        current = self.get_moderation_policy(account_id)
+        current.update(updates)
+        self.policies[account_id] = current
+        self.calls.append(("update_moderation_policy", dict(updates), account_id))
+        return dict(current)
 
     def import_list_entries(self, path, list_type, replace=False, account_id=None):
         self.calls.append(("import_list_entries", path, list_type, replace, account_id))
@@ -344,10 +358,45 @@ def test_account_details_exposes_global_auto_start_and_omits_credentials():
     assert details["auto_start_account_ids"] == ["account-a"]
     assert "api_id" not in details
     assert "api_hash" not in details
+    assert details["moderation_policy"] == {
+        "delete_private_history_after_block": False,
+        "delete_private_history_scope": "self",
+    }
 
     assert service.dispatch("set_auto_start", {"account_ids": ["account-a", "account-b"]}) == {
         "account_ids": ["account-a", "account-b"]
     }
+
+
+def test_moderation_policy_rpc_is_explicitly_account_scoped():
+    core = FakeParityCore()
+    service = CoreService(core=core, platform=FakePlatform())
+
+    assert service.dispatch("get_moderation_policy", {"account_id": "account-a"}) == {
+        "delete_private_history_after_block": False,
+        "delete_private_history_scope": "self",
+    }
+    assert service.dispatch(
+        "update_moderation_policy",
+        {
+            "account_id": "account-b",
+            "updates": {
+                "delete_private_history_after_block": True,
+                "delete_private_history_scope": "both",
+            },
+        },
+    ) == {
+        "delete_private_history_after_block": True,
+        "delete_private_history_scope": "both",
+    }
+    assert service.dispatch("get_moderation_policy", {"account_id": "account-a"}) == {
+        "delete_private_history_after_block": False,
+        "delete_private_history_scope": "self",
+    }
+    assert ("update_moderation_policy", {
+        "delete_private_history_after_block": True,
+        "delete_private_history_scope": "both",
+    }, "account-b") in core.calls
 
 
 def test_scan_protocol_preserves_explicit_false_dry_run():

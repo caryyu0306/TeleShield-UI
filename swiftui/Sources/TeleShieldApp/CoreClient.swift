@@ -26,6 +26,7 @@ final class CoreClient: ObservableObject {
     @Published private(set) var blockRecords: [BlockRecord] = []
     @Published private(set) var report: Report?
     @Published private(set) var scanSettings = ScanSettings.defaults
+    @Published private(set) var moderationPolicy = ModerationPolicy.defaults
     @Published private(set) var scanJobID: String?
     @Published private(set) var scanProgress: [String] = []
     @Published private(set) var scanResult: ScanResult?
@@ -47,7 +48,7 @@ final class CoreClient: ObservableObject {
     var hasActiveScan: Bool { scanJobID != nil || scanStartInFlight }
     var canModifySelectedAccount: Bool {
         guard let selectedAccount else { return false }
-        return !selectedAccount.running && !authInProgress && operationJobID == nil
+        return !selectedAccount.running && !authInProgress && operationJobID == nil && !hasActiveScan
     }
 
     func launch() {
@@ -123,13 +124,19 @@ final class CoreClient: ObservableObject {
         }
     }
 
-    func refreshAccountData() async {
+    func refreshAccountData(accountID: String? = nil) async {
         guard helperIsRunning else { return }
+        guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else { return }
         do {
-            let data = try await request(method: "get_account_details", params: accountParams())
+            let data = try await request(
+                method: "get_account_details",
+                params: ["account_id": .string(targetAccountID)]
+            )
             let details = try decodeResult(AccountDetails.self, from: data)
+            guard selectedAccountID == targetAccountID else { return }
             self.details = details
             scanSettings = details.scanSettings
+            moderationPolicy = details.moderationPolicy ?? .defaults
             learnedPatterns = details.learnedPatterns
             groups = details.managedGroups
         } catch {
@@ -144,6 +151,11 @@ final class CoreClient: ObservableObject {
             self.report = nil
             self.blockRecords = []
             self.eventLog.removeAll()
+            self.details = nil
+            self.scanSettings = .defaults
+            self.moderationPolicy = .defaults
+            self.learnedPatterns = .empty
+            self.groups = []
             _ = try await self.request(method: "select_account", params: ["account_id": .string(accountID)])
             await self.refresh()
         }
@@ -439,7 +451,7 @@ final class CoreClient: ObservableObject {
         } catch { present(error: error) }
     }
 
-    func updateScanSettings(_ settings: ScanSettings) async {
+    func updateScanSettings(_ settings: ScanSettings, accountID: String? = nil) async {
         do {
             let updates: [String: JSONValue] = [
                 "private_dialog_limit": .int(settings.privateDialogLimit),
@@ -449,11 +461,33 @@ final class CoreClient: ObservableObject {
                 "group_message_limit": .int(settings.groupMessageLimit),
                 "group_days": .int(settings.groupDays),
             ]
-            var params = accountParams() ?? [:]
+            guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else { return }
+            var params: [String: JSONValue] = ["account_id": .string(targetAccountID)]
             params["updates"] = .object(updates)
             let data = try await request(method: "update_scan_settings", params: params)
-            scanSettings = try decodeResult(ScanSettings.self, from: data)
+            let updated = try decodeResult(ScanSettings.self, from: data)
+            if selectedAccountID == targetAccountID { scanSettings = updated }
             appendLog("掃描設定已儲存", level: "info")
+        } catch { present(error: error) }
+    }
+
+    func updateModerationPolicy(_ policy: ModerationPolicy, accountID: String? = nil) async {
+        do {
+            guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else { return }
+            let updates: [String: JSONValue] = [
+                "delete_private_history_after_block": .bool(policy.deletePrivateHistoryAfterBlock),
+                "delete_private_history_scope": .string(policy.deletePrivateHistoryScope.rawValue),
+            ]
+            let data = try await request(
+                method: "update_moderation_policy",
+                params: [
+                    "account_id": .string(targetAccountID),
+                    "updates": .object(updates),
+                ]
+            )
+            let updated = try decodeResult(ModerationPolicy.self, from: data)
+            if selectedAccountID == targetAccountID { moderationPolicy = updated }
+            appendLog("防護政策已儲存", level: "info")
         } catch { present(error: error) }
     }
 
@@ -750,4 +784,3 @@ private extension JSONEncoder {
         return encoder
     }
 }
-

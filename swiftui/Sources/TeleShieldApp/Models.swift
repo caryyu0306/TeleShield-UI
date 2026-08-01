@@ -194,6 +194,56 @@ struct LearnedPatterns: Codable {
     static let empty = LearnedPatterns(keywords: [], patterns: [])
 }
 
+enum PrivateHistoryDeletionScope: String, Codable, CaseIterable, Identifiable {
+    case selfOnly = "self"
+    case both = "both"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .selfOnly: return "只刪除自己"
+        case .both: return "嘗試從雙方刪除"
+        }
+    }
+}
+
+struct ModerationPolicy: Codable, Equatable {
+    var deletePrivateHistoryAfterBlock: Bool
+    var deletePrivateHistoryScope: PrivateHistoryDeletionScope
+
+    static let defaults = ModerationPolicy(
+        deletePrivateHistoryAfterBlock: false,
+        deletePrivateHistoryScope: .selfOnly
+    )
+
+    enum CodingKeys: String, CodingKey {
+        case deletePrivateHistoryAfterBlock = "delete_private_history_after_block"
+        case deletePrivateHistoryScope = "delete_private_history_scope"
+    }
+
+    init(
+        deletePrivateHistoryAfterBlock: Bool,
+        deletePrivateHistoryScope: PrivateHistoryDeletionScope
+    ) {
+        self.deletePrivateHistoryAfterBlock = deletePrivateHistoryAfterBlock
+        self.deletePrivateHistoryScope = deletePrivateHistoryScope
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        deletePrivateHistoryAfterBlock = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .deletePrivateHistoryAfterBlock
+        ) ?? Self.defaults.deletePrivateHistoryAfterBlock
+        let rawScope = try container.decodeIfPresent(
+            String.self,
+            forKey: .deletePrivateHistoryScope
+        ) ?? Self.defaults.deletePrivateHistoryScope.rawValue
+        deletePrivateHistoryScope = PrivateHistoryDeletionScope(rawValue: rawScope) ?? .selfOnly
+    }
+}
+
 struct AccountDetails: Codable {
     let accountID: String?
     let loggedIn: Bool
@@ -204,6 +254,7 @@ struct AccountDetails: Codable {
     let autoStart: Bool
     let autoStartAccountID: String?
     let autoStartAccountIDs: [String]
+    let moderationPolicy: ModerationPolicy?
 
     enum CodingKeys: String, CodingKey {
         case accountID = "account_id"
@@ -215,6 +266,7 @@ struct AccountDetails: Codable {
         case autoStart = "auto_start"
         case autoStartAccountID = "auto_start_account_id"
         case autoStartAccountIDs = "auto_start_account_ids"
+        case moderationPolicy = "moderation_policy"
     }
 }
 

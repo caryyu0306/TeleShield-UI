@@ -127,11 +127,17 @@ def test_scan_history_private_dry_run_reports_match_without_blocking(monkeypatch
         "blocked_count": 0,
         "whitelist": {},
         "blacklist": {},
+        "moderation_policy": {
+            "delete_private_history_after_block": True,
+            "delete_private_history_scope": "both",
+        },
     })
 
     spammer = User(id=2, is_self=False, bot=False, first_name="Spam")
 
     class FakeClient:
+        delete_requests = 0
+
         def __init__(self, *args):
             self.block_requests = 0
 
@@ -157,6 +163,9 @@ def test_scan_history_private_dry_run_reports_match_without_blocking(monkeypatch
                 photo=None,
             )]
 
+        async def delete_dialog(self, entity, revoke=False):
+            type(self).delete_requests += 1
+
         async def __call__(self, request):
             return SimpleNamespace(users=[])
 
@@ -168,6 +177,7 @@ def test_scan_history_private_dry_run_reports_match_without_blocking(monkeypatch
     assert result["dry_run"] is True
     assert result["cancelled"] is False
     assert teleshield.load_config()["blocked_count"] == 0
+    assert FakeClient.delete_requests == 0
 
 
 def test_scan_history_private_applies_block_and_records_result(monkeypatch, tmp_path):
@@ -221,6 +231,151 @@ def test_scan_history_private_applies_block_and_records_result(monkeypatch, tmp_
     assert FakeClient.block_requests == 1
     assert teleshield.load_config()["blocked_count"] == 1
     assert teleshield.load_block_log()["blocks"][0]["source"] == "scan"
+
+
+def test_private_history_policy_is_account_scoped_and_requires_successful_block(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.create_account("account-b")
+
+    assert teleshield.get_moderation_policy(account_id="account-a") == {
+        "delete_private_history_after_block": False,
+        "delete_private_history_scope": "self",
+    }
+    assert teleshield.update_moderation_policy(
+        {
+            "delete_private_history_after_block": True,
+            "delete_private_history_scope": "both",
+        },
+        account_id="account-a",
+    ) == {
+        "delete_private_history_after_block": True,
+        "delete_private_history_scope": "both",
+    }
+    assert teleshield.get_moderation_policy(account_id="account-b")[
+        "delete_private_history_after_block"
+    ] is False
+
+    teleshield.save_config({
+        "api_id": 1234,
+        "api_hash": "[REDACTED]",
+        "user_id": 1,
+        "blocked_count": 0,
+        "whitelist": {},
+        "blacklist": {},
+        "moderation_policy": {
+            "delete_private_history_after_block": True,
+            "delete_private_history_scope": "both",
+        },
+    }, account_id="account-a")
+    spammer = User(id=2, is_self=False, bot=False, first_name="Spam")
+
+    class FakeClient:
+        block_requests = 0
+        delete_requests = []
+
+        def __init__(self, *args):
+            pass
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_dialogs(self, limit):
+            return [SimpleNamespace(entity=spammer)]
+
+        async def get_messages(self, entity, limit):
+            return [SimpleNamespace(
+                date=datetime.now(timezone.utc),
+                text="投資穩賺，立即加入",
+                photo=None,
+            )]
+
+        async def delete_dialog(self, entity, revoke=False):
+            self.delete_requests.append((entity.id, revoke))
+
+        async def __call__(self, request):
+            if type(request).__name__ == "BlockRequest":
+                type(self).block_requests += 1
+            return SimpleNamespace(users=[])
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        result = asyncio.run(teleshield.scan_history("private", dry_run=False, account_id="account-a"))
+
+    assert result["acted"] == 1
+    assert result["private_history_deletions"] == 1
+    assert result["private_history_deletions_succeeded"] == 1
+    assert FakeClient.block_requests == 1
+    assert FakeClient.delete_requests == [(2, True)]
+    record = teleshield.load_block_log(account_id="account-a")["blocks"][0]
+    assert record["details"]["private_history_deletion"] == {
+        "requested": True,
+        "scope": "both",
+        "succeeded": True,
+    }
+    assert teleshield.load_block_log(account_id="account-b")["blocks"] == []
+
+
+def test_private_history_deletion_failure_keeps_block_result_and_is_logged(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_config({
+        "api_id": 1234,
+        "api_hash": "[REDACTED]",
+        "user_id": 1,
+        "blocked_count": 0,
+        "whitelist": {},
+        "blacklist": {},
+        "moderation_policy": {
+            "delete_private_history_after_block": True,
+            "delete_private_history_scope": "self",
+        },
+    })
+    spammer = User(id=2, is_self=False, bot=False, first_name="Spam")
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_dialogs(self, limit):
+            return [SimpleNamespace(entity=spammer)]
+
+        async def get_messages(self, entity, limit):
+            return [SimpleNamespace(
+                date=datetime.now(timezone.utc),
+                text="投資穩賺，立即加入",
+                photo=None,
+            )]
+
+        async def delete_dialog(self, entity, revoke=False):
+            raise RuntimeError("Telegram 不允許刪除")
+
+        async def __call__(self, request):
+            return SimpleNamespace(users=[])
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        result = asyncio.run(teleshield.scan_history("private", dry_run=False))
+
+    assert result["acted"] == 1
+    assert result["errors"]
+    record = teleshield.load_block_log()["blocks"][0]
+    deletion = record["details"]["private_history_deletion"]
+    assert deletion["succeeded"] is False
+    assert deletion["scope"] == "self"
+    assert "不允許刪除" in deletion["error"]
 
 
 def test_scan_history_group_dry_run_reports_finding_without_kicking(monkeypatch, tmp_path):

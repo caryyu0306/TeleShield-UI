@@ -54,7 +54,6 @@ struct ContentView: View {
                     Divider()
                 }
                 detailView
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
@@ -487,7 +486,8 @@ private struct ListManagementView: View {
     private var rows: [ListEntry] { listType == "whitelist" ? client.whitelist : client.blacklist }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
             PageHeader(title: "白名單／黑名單", subtitle: "先保護例外，再處理自動偵測到的帳號") {
                 Picker("名單", selection: $listType) {
                     Text("白名單").tag("whitelist")
@@ -544,8 +544,10 @@ private struct ListManagementView: View {
                 .listStyle(.inset)
             }
         }
-        .teleShieldPageContent()
-        .padding(TeleShieldDesign.pagePadding)
+            .teleShieldPageContent()
+            .padding(TeleShieldDesign.pagePadding)
+        }
+        .scrollIndicators(.automatic)
         .task(id: "\(client.selectedAccountID ?? "")|\(listType)") {
             await client.fetchList(listType, query: query)
         }
@@ -581,7 +583,8 @@ private struct RulesView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
             PageHeader(title: "學習規則", subtitle: "從實際廣告文字建立可持久化的關鍵詞與模式") {
                 Button("重新整理") { Task { await client.refreshAccountData() } }
             }
@@ -629,8 +632,10 @@ private struct RulesView: View {
                 .listStyle(.inset)
             }
         }
-        .teleShieldPageContent()
-        .padding(TeleShieldDesign.pagePadding)
+            .teleShieldPageContent()
+            .padding(TeleShieldDesign.pagePadding)
+        }
+        .scrollIndicators(.automatic)
         .task { await client.refreshAccountData() }
     }
 }

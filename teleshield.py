@@ -1593,7 +1593,7 @@ def get_ocr_status() -> dict:
     bundled = bool(path and getattr(sys, "_MEIPASS", None) and str(path).startswith(str(sys._MEIPASS)))
     return {"available": bool(path), "bundled": bundled, "languages": ["chi_sim", "chi_tra", "eng"] if path else []}
 
-def is_spam(text: str, cfg: dict = None) -> bool:
+def is_spam(text: str, cfg: dict = None, account_id: Optional[str] = None) -> bool:
     """檢查文字是否包含廣告模式（含自訂模式）"""
     if not text:
         return False
@@ -1604,7 +1604,7 @@ def is_spam(text: str, cfg: dict = None) -> bool:
             return True
     # 自訂學習模式
     if cfg is not None:
-        lp = get_learned_patterns(cfg)
+        lp = get_learned_patterns(cfg, account_id=account_id)
         for p in lp.get("patterns", []):
             try:
                 if re.search(normalize_traditional(p), text, re.IGNORECASE):
@@ -1945,7 +1945,13 @@ async def scan_history(
 ):
     """Scan recent history using one account's isolated client and storage."""
     with account_context(account_id):
-        return await _scan_history(scope, dry_run, progress_callback, cancel_event)
+        return await _scan_history(
+            scope,
+            dry_run,
+            progress_callback,
+            cancel_event,
+            account_id=account_id,
+        )
 
 
 async def _scan_history(
@@ -1953,6 +1959,7 @@ async def _scan_history(
     dry_run: bool = False,
     progress_callback=None,
     cancel_event=None,
+    account_id: Optional[str] = None,
 ):
     """Scan recent private history and optionally apply moderation.
 
@@ -1975,6 +1982,7 @@ async def _scan_history(
         raise RuntimeError("尚未登入 Telegram")
 
     result = {
+        "account_id": account_id or store.account_id,
         "scope": scope,
         "dry_run": dry_run,
         "dialogs_seen": 0,
@@ -1990,6 +1998,7 @@ async def _scan_history(
     }
     now = datetime.now(timezone.utc)
     scan_settings = get_scan_settings(cfg)
+    scan_account_id = account_id or store.account_id
 
     def cancelled() -> bool:
         return bool(cancel_event and cancel_event.is_set())
@@ -2019,22 +2028,59 @@ async def _scan_history(
         contact_ids = {contact.id for contact in contacts}
 
         if scope == "private":
-            dialogs = await client.get_dialogs(limit=scan_settings["private_dialog_limit"])
-            total = len(dialogs)
-            for index, dialog in enumerate(dialogs, 1):
-                result["dialogs_seen"] += 1
+            eligible_dialogs = []
+            dialog_iterator = getattr(client, "iter_dialogs", None)
+            if callable(dialog_iterator):
+                # No folder is specified so Telethon includes archived dialogs.
+                # The limit is applied after local eligibility filtering below;
+                # groups, channels, contacts, and other excluded dialogs do not
+                # consume the private-dialog scan budget.
+                async for dialog in dialog_iterator(limit=None):
+                    result["dialogs_seen"] += 1
+                    if cancelled():
+                        result["cancelled"] = True
+                        break
+                    entity = dialog.entity
+                    if (
+                        not isinstance(entity, User)
+                        or entity.is_self
+                        or entity.bot
+                        or entity.id in contact_ids
+                        or is_whitelisted(entity.id, cfg)
+                    ):
+                        continue
+                    eligible_dialogs.append(dialog)
+                    if len(eligible_dialogs) >= scan_settings["private_dialog_limit"]:
+                        break
+            else:
+                # Keep lightweight test doubles and older compatible clients
+                # working; the production Telethon client always has iter_dialogs.
+                dialogs = await client.get_dialogs(limit=scan_settings["private_dialog_limit"])
+                for dialog in dialogs:
+                    result["dialogs_seen"] += 1
+                    if cancelled():
+                        result["cancelled"] = True
+                        break
+                    entity = dialog.entity
+                    if (
+                        not isinstance(entity, User)
+                        or entity.is_self
+                        or entity.bot
+                        or entity.id in contact_ids
+                        or is_whitelisted(entity.id, cfg)
+                    ):
+                        continue
+                    eligible_dialogs.append(dialog)
+
+            if result["cancelled"]:
+                return result
+
+            total = len(eligible_dialogs)
+            for index, dialog in enumerate(eligible_dialogs, 1):
                 if cancelled():
                     result["cancelled"] = True
                     break
                 entity = dialog.entity
-                if (
-                    not isinstance(entity, User)
-                    or entity.is_self
-                    or entity.bot
-                    or entity.id in contact_ids
-                    or is_whitelisted(entity.id, cfg)
-                ):
-                    continue
                 result["dialogs_scanned"] += 1
                 progress(f"掃描私訊 {index}/{total}…")
                 try:
@@ -2053,11 +2099,11 @@ async def _scan_history(
                     if message.date and message.date < now - timedelta(days=scan_settings["private_days"]):
                         continue
                     reason = message.text or ""
-                    if not is_spam(reason, cfg) and message.photo:
+                    if not is_spam(reason, cfg, account_id=scan_account_id) and message.photo:
                         ocr_text = await check_photo(client, message)
-                        if ocr_text and is_spam(ocr_text, cfg):
+                        if ocr_text and is_spam(ocr_text, cfg, account_id=scan_account_id):
                             reason = f"[OCR] {ocr_text[:100]}"
-                    if not reason or not is_spam(reason, cfg):
+                    if not reason or not is_spam(reason, cfg, account_id=scan_account_id):
                         continue
 
                     result["matched"] += 1
@@ -2202,11 +2248,11 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
 
             # 檢測
             spam_text = msg.text or ""
-            is_spam_by_text = is_spam(spam_text, cfg)
+            is_spam_by_text = is_spam(spam_text, cfg, account_id=store.account_id)
             ocr_found_spam = False
             if not is_spam_by_text and msg.photo:
                 ocr_text = await check_photo(client, msg)
-                if ocr_text and is_spam(ocr_text, cfg):
+                if ocr_text and is_spam(ocr_text, cfg, account_id=store.account_id):
                     ocr_found_spam = True
                     spam_text = ocr_text[:100]
 

@@ -42,7 +42,11 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            sidebar
+            VStack(spacing: 0) {
+                sidebar
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                sidebarStatus
+            }
         } detail: {
             VStack(spacing: 0) {
                 if section != .settings && section != .accounts {
@@ -50,6 +54,7 @@ struct ContentView: View {
                     Divider()
                 }
                 detailView
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
@@ -120,24 +125,25 @@ struct ContentView: View {
         }
         .listStyle(.sidebar)
         .navigationTitle("TeleShield")
-        .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 7) {
-                Label(client.connectionMessage, systemImage: client.helperIsRunning ? "circle.fill" : "circle")
-                    .font(.caption)
-                    .foregroundStyle(client.helperIsRunning ? .green : .secondary)
-                if let account = client.selectedAccount {
-                    HStack(spacing: 6) {
-                        Text(account.label)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        AccountStatusBadge(account: account)
-                    }
+    }
+
+    private var sidebarStatus: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(client.connectionMessage, systemImage: client.helperIsRunning ? "circle.fill" : "circle")
+                .font(.caption)
+                .foregroundStyle(client.helperIsRunning ? .green : .secondary)
+            if let account = client.selectedAccount {
+                HStack(spacing: 6) {
+                    Text(account.label)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    AccountStatusBadge(account: account)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(.bar)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.bar)
     }
 
     @ViewBuilder
@@ -1464,6 +1470,8 @@ private struct CurrentAccountBar: View {
         .padding(.horizontal, TeleShieldDesign.pagePadding)
         .padding(.vertical, 10)
         .teleShieldPageContent()
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(minHeight: 82, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .center)
         .background(.bar)
         .accessibilityElement(children: .contain)

@@ -42,7 +42,11 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            sidebar
+            VStack(spacing: 0) {
+                sidebar
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                sidebarStatus
+            }
         } detail: {
             VStack(spacing: 0) {
                 if section != .settings && section != .accounts {
@@ -120,24 +124,25 @@ struct ContentView: View {
         }
         .listStyle(.sidebar)
         .navigationTitle("TeleShield")
-        .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 7) {
-                Label(client.connectionMessage, systemImage: client.helperIsRunning ? "circle.fill" : "circle")
-                    .font(.caption)
-                    .foregroundStyle(client.helperIsRunning ? .green : .secondary)
-                if let account = client.selectedAccount {
-                    HStack(spacing: 6) {
-                        Text(account.label)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        AccountStatusBadge(account: account)
-                    }
+    }
+
+    private var sidebarStatus: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(client.connectionMessage, systemImage: client.helperIsRunning ? "circle.fill" : "circle")
+                .font(.caption)
+                .foregroundStyle(client.helperIsRunning ? .green : .secondary)
+            if let account = client.selectedAccount {
+                HStack(spacing: 6) {
+                    Text(account.label)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    AccountStatusBadge(account: account)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(.bar)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.bar)
     }
 
     @ViewBuilder
@@ -481,7 +486,8 @@ private struct ListManagementView: View {
     private var rows: [ListEntry] { listType == "whitelist" ? client.whitelist : client.blacklist }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
             PageHeader(title: "白名單／黑名單", subtitle: "先保護例外，再處理自動偵測到的帳號") {
                 Picker("名單", selection: $listType) {
                     Text("白名單").tag("whitelist")
@@ -525,22 +531,40 @@ private struct ListManagementView: View {
                     message: "新增 Telegram User ID 或 Username 後，這裡會顯示可管理的例外項目。"
                 )
             } else {
-                List(rows, selection: $selectedIDs) { row in
-                    HStack {
-                        Text(row.userID).font(.body.monospaced())
-                        Text(row.username.isEmpty ? "—" : "@\(row.username)").foregroundStyle(.secondary)
-                        Spacer()
-                        Text(row.reason).font(.callout).foregroundStyle(.secondary).lineLimit(1)
-                        Text(row.added).font(.caption).foregroundStyle(TeleShieldDesign.muted)
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { row in
+                        HStack {
+                            Text(row.userID).font(.body.monospaced())
+                            Text(row.username.isEmpty ? "—" : "@\(row.username)").foregroundStyle(.secondary)
+                            Spacer()
+                            Text(row.reason).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                            Text(row.added).font(.caption).foregroundStyle(TeleShieldDesign.muted)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(selectedIDs.contains(row.id) ? Color.accentColor.opacity(0.16) : .clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if selectedIDs.contains(row.id) {
+                                selectedIDs.remove(row.id)
+                            } else {
+                                selectedIDs.insert(row.id)
+                            }
+                        }
                     }
-                    .tag(row.id)
                 }
-                .listStyle(.inset)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color(nsColor: .textBackgroundColor))
             }
         }
-        .teleShieldPageContent()
-        .padding(TeleShieldDesign.pagePadding)
-        .task(id: listType) { await client.fetchList(listType, query: query) }
+            .teleShieldPageContent()
+            .padding(TeleShieldDesign.pagePadding)
+        }
+        .scrollIndicators(.automatic)
+        .task(id: "\(client.selectedAccountID ?? "")|\(listType)") {
+            await client.fetchList(listType, query: query)
+        }
         .confirmationDialog("移除選取的名單項目？", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
             Button("確認移除", role: .destructive) {
                 Task {
@@ -573,7 +597,8 @@ private struct RulesView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
             PageHeader(title: "學習規則", subtitle: "從實際廣告文字建立可持久化的關鍵詞與模式") {
                 Button("重新整理") { Task { await client.refreshAccountData() } }
             }
@@ -608,21 +633,32 @@ private struct RulesView: View {
                     message: "貼上一則廣告或可疑訊息，讓 TeleShield 建立可重複使用的關鍵詞與模式。"
                 )
             } else {
-                List(rules, id: \.value, selection: Binding(get: { selected?.value }, set: { value in selected = rules.first { $0.value == value } })) { rule in
-                    HStack {
-                        Text(rule.kind == "keywords" ? "關鍵詞" : "模式")
-                            .font(.caption.bold())
-                            .foregroundStyle(rule.kind == "keywords" ? .blue : .orange)
-                            .frame(width: 65, alignment: .leading)
-                        Text(rule.value).font(.body.monospaced())
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(rules.enumerated()), id: \.offset) { _, rule in
+                        HStack {
+                            Text(rule.kind == "keywords" ? "關鍵詞" : "模式")
+                                .font(.caption.bold())
+                                .foregroundStyle(rule.kind == "keywords" ? .blue : .orange)
+                                .frame(width: 65, alignment: .leading)
+                            Text(rule.value).font(.body.monospaced())
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(selected?.kind == rule.kind && selected?.value == rule.value ? Color.accentColor.opacity(0.16) : .clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selected = rule }
                     }
-                    .tag(rule.value)
                 }
-                .listStyle(.inset)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color(nsColor: .textBackgroundColor))
             }
         }
-        .teleShieldPageContent()
-        .padding(TeleShieldDesign.pagePadding)
+            .teleShieldPageContent()
+            .padding(TeleShieldDesign.pagePadding)
+        }
+        .scrollIndicators(.automatic)
         .task { await client.refreshAccountData() }
     }
 }
@@ -1462,6 +1498,8 @@ private struct CurrentAccountBar: View {
         .padding(.horizontal, TeleShieldDesign.pagePadding)
         .padding(.vertical, 10)
         .teleShieldPageContent()
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(minHeight: 82, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .center)
         .background(.bar)
         .accessibilityElement(children: .contain)

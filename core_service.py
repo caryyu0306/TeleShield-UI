@@ -1041,6 +1041,7 @@ class CoreService:
                     {
                         "event": "scan_progress",
                         "job_id": job_id,
+                        "account_id": account_id,
                         "message": str(message),
                     }
                 )
@@ -1056,13 +1057,19 @@ class CoreService:
                     )
                 )
                 self._emit_event(
-                    {"event": "scan_finished", "job_id": job_id, "result": result}
+                    {
+                        "event": "scan_finished",
+                        "job_id": job_id,
+                        "account_id": account_id,
+                        "result": result,
+                    }
                 )
             except Exception as exc:
                 self._emit_event(
                     {
                         "event": "scan_failed",
                         "job_id": job_id,
+                        "account_id": account_id,
                         "error": {"type": type(exc).__name__, "message": str(exc)},
                     }
                 )

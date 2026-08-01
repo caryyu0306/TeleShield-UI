@@ -454,7 +454,13 @@ def test_scan_protocol_preserves_explicit_false_dry_run():
     service = CoreService(core=core, emit_event=events.append)
     job = service.dispatch("start_scan", {"scope": "private", "dry_run": "false"})
     assert job["running"] is True
-    result = _wait_for_event(events, "scan_finished")["result"]
+    finished = _wait_for_event(events, "scan_finished")
+    result = finished["result"]
+    assert finished["account_id"] == "account-a"
+    assert any(
+        event.get("event") == "scan_progress" and event.get("account_id") == "account-a"
+        for event in events
+    )
     assert result["dry_run"] is False
     assert core.seen_dry_run is False
 

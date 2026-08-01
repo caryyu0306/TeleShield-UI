@@ -122,7 +122,6 @@ jobs:
       - name: Validate app metadata and report size
         run: |
           plutil -lint dist/TeleShieldSwiftUI.app/Contents/Info.plist
-          test "$(plutil -extract CFBundleIconFile raw -o - dist/TeleShieldSwiftUI.app/Contents/Info.plist)" = "TeleShield.icns"
           test "$(plutil -extract CFBundleIconFiles.0 raw -o - dist/TeleShieldSwiftUI.app/Contents/Info.plist)" = "TeleShield.icns"
           test -s dist/TeleShieldSwiftUI.app/Contents/Resources/TeleShield.icns
           du -sh dist/TeleShieldSwiftUI.app

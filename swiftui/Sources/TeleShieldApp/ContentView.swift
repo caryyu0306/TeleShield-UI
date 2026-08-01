@@ -51,6 +51,7 @@ struct ContentView: View {
                 }
                 detailView
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 1080, minHeight: 700)
         .onAppear { client.launch() }
@@ -1458,9 +1459,10 @@ private struct CurrentAccountBar: View {
 
             Spacer()
         }
-        .padding(.horizontal, 28)
+        .padding(.horizontal, TeleShieldDesign.pagePadding)
         .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .teleShieldPageContent()
+        .frame(maxWidth: .infinity, alignment: .center)
         .background(.bar)
         .accessibilityElement(children: .contain)
     }

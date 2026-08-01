@@ -531,17 +531,31 @@ private struct ListManagementView: View {
                     message: "新增 Telegram User ID 或 Username 後，這裡會顯示可管理的例外項目。"
                 )
             } else {
-                List(rows, selection: $selectedIDs) { row in
-                    HStack {
-                        Text(row.userID).font(.body.monospaced())
-                        Text(row.username.isEmpty ? "—" : "@\(row.username)").foregroundStyle(.secondary)
-                        Spacer()
-                        Text(row.reason).font(.callout).foregroundStyle(.secondary).lineLimit(1)
-                        Text(row.added).font(.caption).foregroundStyle(TeleShieldDesign.muted)
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { row in
+                        HStack {
+                            Text(row.userID).font(.body.monospaced())
+                            Text(row.username.isEmpty ? "—" : "@\(row.username)").foregroundStyle(.secondary)
+                            Spacer()
+                            Text(row.reason).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                            Text(row.added).font(.caption).foregroundStyle(TeleShieldDesign.muted)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(selectedIDs.contains(row.id) ? Color.accentColor.opacity(0.16) : .clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if selectedIDs.contains(row.id) {
+                                selectedIDs.remove(row.id)
+                            } else {
+                                selectedIDs.insert(row.id)
+                            }
+                        }
                     }
-                    .tag(row.id)
                 }
-                .listStyle(.inset)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color(nsColor: .textBackgroundColor))
             }
         }
             .teleShieldPageContent()
@@ -619,17 +633,26 @@ private struct RulesView: View {
                     message: "貼上一則廣告或可疑訊息，讓 TeleShield 建立可重複使用的關鍵詞與模式。"
                 )
             } else {
-                List(rules, id: \.value, selection: Binding(get: { selected?.value }, set: { value in selected = rules.first { $0.value == value } })) { rule in
-                    HStack {
-                        Text(rule.kind == "keywords" ? "關鍵詞" : "模式")
-                            .font(.caption.bold())
-                            .foregroundStyle(rule.kind == "keywords" ? .blue : .orange)
-                            .frame(width: 65, alignment: .leading)
-                        Text(rule.value).font(.body.monospaced())
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(rules.enumerated()), id: \.offset) { _, rule in
+                        HStack {
+                            Text(rule.kind == "keywords" ? "關鍵詞" : "模式")
+                                .font(.caption.bold())
+                                .foregroundStyle(rule.kind == "keywords" ? .blue : .orange)
+                                .frame(width: 65, alignment: .leading)
+                            Text(rule.value).font(.body.monospaced())
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(selected?.kind == rule.kind && selected?.value == rule.value ? Color.accentColor.opacity(0.16) : .clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selected = rule }
                     }
-                    .tag(rule.value)
                 }
-                .listStyle(.inset)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color(nsColor: .textBackgroundColor))
             }
         }
             .teleShieldPageContent()

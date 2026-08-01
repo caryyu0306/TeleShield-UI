@@ -1210,12 +1210,62 @@ def send_telegram_bot_message(
     return result
 
 
-def test_telegram_notification(bot_token: str, channel_id: str) -> dict:
+def _notification_account_identity(
+    account_id: Optional[str] = None,
+    cfg: Optional[dict] = None,
+) -> tuple[str, str]:
+    """Return the human-facing Telegram identity that owns a notification."""
+    if cfg is None:
+        cfg = load_config(account_id)
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    resolved_account_id = account_id
+    if not resolved_account_id:
+        current_store = _CURRENT_ACCOUNT_STORE.get()
+        resolved_account_id = current_store.account_id if current_store else None
+    if not resolved_account_id:
+        resolved_account_id = get_active_account_id()
+
+    record = get_account(resolved_account_id) if resolved_account_id else None
+    record = record if isinstance(record, dict) else {}
+
+    display_name = " ".join(
+        str(record.get("display_name") or cfg.get("display_name") or "").split()
+    )
+    username = str(record.get("username") or cfg.get("username") or "").strip()
+    if not display_name:
+        display_name = f"@{username.lstrip('@')}" if username else "未知帳號"
+
+    owner_user_id = record.get("user_id")
+    if owner_user_id in (None, ""):
+        owner_user_id = cfg.get("user_id")
+    owner_user_id = str(owner_user_id).strip() if owner_user_id not in (None, "") else "未知 ID"
+    return display_name, owner_user_id
+
+
+def _build_telegram_test_notification(account_id: Optional[str] = None) -> str:
+    account_name, owner_user_id = _notification_account_identity(account_id=account_id)
+    return "\n".join(
+        [
+            "✅ TeleShield 測試通知",
+            "",
+            f"帳號: {account_name} ({owner_user_id})",
+            "Bot Token 與 Channel ID 已成功驗證。",
+        ]
+    )
+
+
+def test_telegram_notification(
+    bot_token: str,
+    channel_id: str,
+    account_id: Optional[str] = None,
+) -> dict:
     """Send a test message to validate the Bot Token and Channel ID."""
     send_telegram_bot_message(
         bot_token,
         channel_id,
-        "✅ TeleShield 測試通知\n\nBot Token 與 Channel ID 已成功驗證。",
+        _build_telegram_test_notification(account_id=account_id),
     )
     return {"sent": True}
 
@@ -1235,9 +1285,15 @@ def build_telegram_block_notification(
     reason: str,
     deletion: Optional[dict],
     block_time: Optional[datetime] = None,
+    account_id: Optional[str] = None,
+    account_cfg: Optional[dict] = None,
 ) -> str:
     """Build the stable notification text sent after a private block."""
     block_time = block_time or datetime.now(timezone.utc)
+    account_name, owner_user_id = _notification_account_identity(
+        account_id=account_id,
+        cfg=account_cfg,
+    )
     display_name = " ".join(str(name or "").split()) or "未知名稱"
     display_reason = " ".join(str(reason or "未記錄原因").split())[:1000]
     delete_enabled = deletion is not None
@@ -1249,6 +1305,7 @@ def build_telegram_block_notification(
         [
             "🚫 TeleShield 封鎖通知",
             "",
+            f"帳號: {account_name} ({owner_user_id})",
             f"封鎖名稱 & ID: {display_name} ({user_id})",
             f"封鎖原因: {display_reason}",
             f"封鎖時間: {_format_notification_time(block_time)}",
@@ -1265,6 +1322,7 @@ async def _notify_telegram_after_block(
     deletion: Optional[dict],
     cfg: Optional[dict],
     block_time: datetime,
+    account_id: Optional[str] = None,
 ) -> dict:
     policy = get_moderation_policy(cfg)
     notification_policy = policy["telegram_notification"]
@@ -1284,6 +1342,8 @@ async def _notify_telegram_after_block(
         reason,
         deletion,
         block_time=block_time,
+        account_id=account_id,
+        account_cfg=cfg,
     )
     try:
         await asyncio.to_thread(
@@ -1678,6 +1738,7 @@ async def block_private_user(
     reason: str,
     source: str,
     cfg: Optional[dict] = None,
+    account_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Block a private user and then apply the account's cleanup policy."""
     from telethon.tl.functions.contacts import BlockRequest
@@ -1692,6 +1753,7 @@ async def block_private_user(
         deletion,
         cfg,
         block_time,
+        account_id=account_id,
     )
     details = {}
     if deletion:
@@ -2125,6 +2187,7 @@ async def _scan_history(
                             reason,
                             "scan",
                             cfg,
+                            account_id=scan_account_id,
                         )
                         result["acted"] += 1
                         if deletion:
@@ -2217,6 +2280,7 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
                     "黑名單",
                     "blacklist",
                     cfg,
+                    account_id=store.account_id,
                 )
                 cfg["blocked_count"] = cfg.get("blocked_count", 0) + 1
                 save_config(cfg)
@@ -2274,6 +2338,7 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
                     spam_text,
                     "private",
                     cfg,
+                    account_id=store.account_id,
                 )
                 cfg["blocked_count"] = cfg.get("blocked_count", 0) + 1
                 save_config(cfg)

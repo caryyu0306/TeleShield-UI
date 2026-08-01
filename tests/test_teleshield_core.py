@@ -444,6 +444,18 @@ def test_private_history_deletion_failure_keeps_block_result_and_is_logged(monke
 def test_telegram_notification_formats_and_sends_bot_api_message(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     captured = {}
+    account_id = "account-owner"
+    teleshield.create_account(account_id)
+    teleshield.update_account_identity(
+        account_id,
+        SimpleNamespace(
+            id=101,
+            username="caryyu",
+            first_name="Cary",
+            last_name="Yu",
+        ),
+        root=tmp_path,
+    )
 
     class FakeResponse:
         def __enter__(self):
@@ -463,7 +475,11 @@ def test_telegram_notification_formats_and_sends_bot_api_message(monkeypatch, tm
 
     monkeypatch.setattr(teleshield.urllib.request, "urlopen", fake_urlopen)
 
-    result = teleshield.test_telegram_notification("123456:ABC", "-1001234567890")
+    result = teleshield.test_telegram_notification(
+        "123456:ABC",
+        "-1001234567890",
+        account_id=account_id,
+    )
 
     assert result == {"sent": True}
     assert captured["timeout"] == teleshield.TELEGRAM_BOT_API_TIMEOUT
@@ -471,7 +487,46 @@ def test_telegram_notification_formats_and_sends_bot_api_message(monkeypatch, tm
     assert captured["request"].full_url.endswith("/bot123456:ABC/sendMessage")
     payload = teleshield.urllib.parse.parse_qs(captured["request"].data.decode("utf-8"))
     assert payload["chat_id"] == ["-1001234567890"]
+    assert "帳號: Cary Yu (101)" in payload["text"][0]
     assert "Bot Token 與 Channel ID 已成功驗證。" in payload["text"][0]
+
+
+def test_block_notification_uses_the_selected_account_identity(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    first_account = "account-first"
+    second_account = "account-second"
+    teleshield.create_account(first_account)
+    teleshield.create_account(second_account)
+    teleshield.update_account_identity(
+        first_account,
+        SimpleNamespace(id=101, username="caryyu", first_name="Cary", last_name="Yu"),
+        root=tmp_path,
+    )
+    teleshield.update_account_identity(
+        second_account,
+        SimpleNamespace(id=202, username="other", first_name="Other", last_name="User"),
+        root=tmp_path,
+    )
+
+    first_message = teleshield.build_telegram_block_notification(
+        134037075,
+        "Blocked User",
+        "廣告內容",
+        None,
+        account_id=first_account,
+    )
+    second_message = teleshield.build_telegram_block_notification(
+        134037075,
+        "Blocked User",
+        "廣告內容",
+        None,
+        account_id=second_account,
+    )
+
+    assert "帳號: Cary Yu (101)" in first_message
+    assert "帳號: Other User (202)" in second_message
+    assert "帳號: Other User (202)" not in first_message
+    assert "帳號: Cary Yu (101)" not in second_message
 
 
 def test_private_block_notification_includes_deletion_result(monkeypatch, tmp_path):

@@ -1043,7 +1043,8 @@ private struct AccountDetailsSettingsView: View {
                             Task {
                                 let testError = await client.testTelegramNotification(
                                     botToken: botToken,
-                                    channelID: channelID
+                                    channelID: channelID,
+                                    accountID: accountID
                                 )
                                 testingNotification = false
                                 notificationTestStatus = testError.map {

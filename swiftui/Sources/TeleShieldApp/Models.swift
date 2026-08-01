@@ -427,6 +427,7 @@ struct ScanFinding: Codable, Identifiable {
 }
 
 struct ScanResult: Codable {
+    let accountID: String?
     let scope: String
     let dryRun: Bool
     let dialogsSeen: Int
@@ -439,6 +440,7 @@ struct ScanResult: Codable {
     let cancelled: Bool
 
     enum CodingKeys: String, CodingKey {
+        case accountID = "account_id"
         case scope
         case dryRun = "dry_run"
         case dialogsSeen = "dialogs_seen"

@@ -194,8 +194,6 @@ class CoreService:
             "get_block_records": self._get_block_records,
             "export_blocks": self._export_blocks,
             "build_report": self._build_report,
-            "discover_groups": self._discover_groups,
-            "set_group_enabled": self._set_group_enabled,
             "logout": self._logout,
             "clear_session": self._clear_session,
             "get_scan_settings": self._get_scan_settings,
@@ -405,7 +403,6 @@ class CoreService:
             "phone_masked": record.get("phone_masked", ""),
             "configured": bool(cfg.get("api_id") and cfg.get("user_id")),
             "blocked_count": int(cfg.get("blocked_count", 0) or 0),
-            "kicked_count": int(cfg.get("kicked_count", 0) or 0),
             "recent_block_count": self._recent_block_count(account_id, cfg),
             "whitelist_count": len(cfg.get("whitelist", {}) or {}),
             "blacklist_count": len(cfg.get("blacklist", {}) or {}),
@@ -496,7 +493,6 @@ class CoreService:
             "account_id": account_id,
             "logged_in": bool(cfg.get("user_id")),
             "has_api_credentials": bool(cfg.get("api_id") and cfg.get("api_hash")),
-            "managed_groups": list(cfg.get("managed_groups") or []),
             "scan_settings": self.core.get_scan_settings(account_id=account_id),
             "learned_patterns": self.core.get_learned_patterns(account_id=account_id),
             "auto_start": auto_start,
@@ -1001,25 +997,6 @@ class CoreService:
             self._jobs[job_id] = (thread, cancel_event)
         thread.start()
         return {"job_id": job_id, "account_id": account_id, "running": True}
-
-    def _discover_groups(self, params: dict[str, Any]) -> dict[str, Any]:
-        account_id = self._resolve_account_id(params)
-        return self._start_async_job(
-            lambda: self.core.discover_managed_groups(account_id=account_id),
-            "groups_finished",
-            account_id,
-        )
-
-    def _set_group_enabled(self, params: dict[str, Any]) -> dict[str, Any]:
-        group_id = str(params.get("group_id") or "").strip()
-        if not group_id:
-            raise InvalidRequestError("group_id 不可為空")
-        updated = self.core.set_managed_group_enabled(
-            group_id,
-            self._coerce_bool(params.get("enabled")),
-            account_id=self._resolve_account_id(params),
-        )
-        return {"updated": bool(updated), "group_id": group_id}
 
     def _logout(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)

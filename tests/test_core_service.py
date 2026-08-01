@@ -24,7 +24,6 @@ class FakeCore:
             "user_id": 101,
             "username": "alice",
             "blocked_count": 4,
-            "kicked_count": 2,
             "whitelist": {"9": {}},
             "blacklist": {"8": {}},
         }
@@ -64,7 +63,7 @@ def test_get_status_exposes_safe_core_summary_and_selected_account():
     assert result["active_account_id"] == "account-a"
     assert result["selected_account"]["username"] == "alice"
     assert result["selected_account"]["blocked_count"] == 4
-    assert result["selected_account"]["kicked_count"] == 2
+    assert "kicked_count" not in result["selected_account"]
     assert result["selected_account"]["whitelist_count"] == 1
     assert result["selected_account"]["blacklist_count"] == 1
     assert result["selected_account"]["configured"] is True
@@ -230,7 +229,6 @@ class FakeParityCore(FakeCore):
         super().__init__()
         self.startup_enabled = False
         self.learned = {"keywords": ["spam"], "patterns": ["https://"]}
-        self.groups = [{"id": "-100", "title": "Announcements", "enabled": True}]
         self.calls = []
         self.auto_start_ids = ["account-a"]
         self.policies = {}
@@ -248,14 +246,6 @@ class FakeParityCore(FakeCore):
 
     def remove_learned_pattern(self, kind, value, account_id=None):
         self.calls.append(("remove_learned_pattern", kind, value))
-        return True
-
-    async def discover_managed_groups(self, account_id=None):
-        self.calls.append(("discover_managed_groups", account_id))
-        return self.groups
-
-    def set_managed_group_enabled(self, group_id, enabled, account_id=None):
-        self.calls.append(("set_managed_group_enabled", str(group_id), enabled))
         return True
 
     async def logout_account(self, remove_credentials=False, account_id=None):
@@ -327,7 +317,7 @@ def _wait_for_event(events, name, timeout=2):
     raise AssertionError(f"event not emitted: {name}")
 
 
-def test_management_surface_covers_account_rules_groups_exports_and_startup():
+def test_management_surface_covers_account_rules_exports_and_startup():
     events = []
     core = FakeParityCore()
     service = CoreService(core=core, emit_event=events.append, platform=FakePlatform())
@@ -338,7 +328,6 @@ def test_management_surface_covers_account_rules_groups_exports_and_startup():
     assert service.dispatch(
         "remove_learned_pattern", {"kind": "keywords", "value": "spam"}
     )["removed"] is True
-    assert service.dispatch("set_group_enabled", {"group_id": "-100", "enabled": False})["updated"] is True
     assert service.dispatch("get_startup_status")["enabled"] is False
     assert service.dispatch("set_startup", {"enabled": True})["enabled"] is True
     assert service.dispatch("import_list", {"path": "/tmp/in.json", "list_type": "blacklist"})["count"] == 2
@@ -346,10 +335,6 @@ def test_management_surface_covers_account_rules_groups_exports_and_startup():
     assert service.dispatch("export_blocks", {"path": "/tmp/log.csv", "fmt": "csv"})["count"] == 4
     assert service.dispatch("get_scan_settings")["private_dialog_limit"] == 1
     assert service.dispatch("update_scan_settings", {"updates": {"private_dialog_limit": 4}})["private_dialog_limit"] == 4
-
-    group_job = service.dispatch("discover_groups")
-    assert group_job["running"] is True
-    assert _wait_for_event(events, "groups_finished")["result"] == core.groups
 
     logout_job = service.dispatch("logout", {"remove_credentials": False})
     assert logout_job["running"] is True

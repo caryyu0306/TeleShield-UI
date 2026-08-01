@@ -22,7 +22,6 @@ final class CoreClient: ObservableObject {
     @Published private(set) var whitelist: [ListEntry] = []
     @Published private(set) var blacklist: [ListEntry] = []
     @Published private(set) var learnedPatterns = LearnedPatterns.empty
-    @Published private(set) var groups: [ManagedGroup] = []
     @Published private(set) var blockRecords: [BlockRecord] = []
     @Published private(set) var report: Report?
     @Published private(set) var scanSettings = ScanSettings.defaults
@@ -138,7 +137,6 @@ final class CoreClient: ObservableObject {
             scanSettings = details.scanSettings
             moderationPolicy = details.moderationPolicy ?? .defaults
             learnedPatterns = details.learnedPatterns
-            groups = details.managedGroups
         } catch {
             present(error: error)
         }
@@ -155,7 +153,6 @@ final class CoreClient: ObservableObject {
             self.scanSettings = .defaults
             self.moderationPolicy = .defaults
             self.learnedPatterns = .empty
-            self.groups = []
             _ = try await self.request(method: "select_account", params: ["account_id": .string(accountID)])
             await self.refresh()
         }
@@ -236,9 +233,17 @@ final class CoreClient: ObservableObject {
     func startProtection() async { await performProtectionAction("start_protection") }
     func stopProtection() async { await performProtectionAction("stop_protection") }
 
-    private func performProtectionAction(_ method: String) async {
+    func setProtection(accountID: String, enabled: Bool) async {
+        await performProtectionAction(
+            enabled ? "start_protection" : "stop_protection",
+            accountID: accountID
+        )
+    }
+
+    private func performProtectionAction(_ method: String, accountID: String? = nil) async {
         await runBusy(method == "start_protection" ? "啟動防護" : "停止防護") {
-            _ = try await self.request(method: method, params: self.accountParams())
+            let params = accountID.map { ["account_id": JSONValue.string($0)] } ?? self.accountParams()
+            _ = try await self.request(method: method, params: params)
             await self.refresh()
         }
     }
@@ -429,37 +434,12 @@ final class CoreClient: ObservableObject {
         } catch { present(error: error) }
     }
 
-    func discoverGroups() async {
-        guard canModifySelectedAccount else { return }
-        do {
-            let data = try await request(method: "discover_groups", params: accountParams())
-            operationJobID = try decodeResult(JobStartResult.self, from: data).jobID
-        } catch { present(error: error) }
-    }
-
-    func setGroupEnabled(_ groupID: String, enabled: Bool) async {
-        do {
-            var params = accountParams() ?? [:]
-            params["group_id"] = .string(groupID)
-            params["enabled"] = .bool(enabled)
-            _ = try await request(method: "set_group_enabled", params: params)
-            groups = groups.map { group in
-                group.id == groupID
-                    ? ManagedGroup(groupID: group.groupID, title: group.title, username: group.username, permission: group.permission, enabled: enabled)
-                    : group
-            }
-        } catch { present(error: error) }
-    }
-
     func updateScanSettings(_ settings: ScanSettings, accountID: String? = nil) async {
         do {
             let updates: [String: JSONValue] = [
                 "private_dialog_limit": .int(settings.privateDialogLimit),
                 "private_message_limit": .int(settings.privateMessageLimit),
                 "private_days": .int(settings.privateDays),
-                "group_dialog_limit": .int(settings.groupDialogLimit),
-                "group_message_limit": .int(settings.groupMessageLimit),
-                "group_days": .int(settings.groupDays),
             ]
             guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else { return }
             var params: [String: JSONValue] = ["account_id": .string(targetAccountID)]
@@ -523,7 +503,7 @@ final class CoreClient: ObservableObject {
         }
     }
 
-    func startScan(scope: String, dryRun: Bool) async {
+    func startScan(dryRun: Bool) async {
         guard !hasActiveScan else { return }
         guard selectedAccount?.running != true else {
             errorMessage = "請先停止即時防護，再掃描同一帳號的歷史訊息"
@@ -535,7 +515,7 @@ final class CoreClient: ObservableObject {
             scanProgress.removeAll()
             scanResult = nil
             var params = accountParams() ?? [:]
-            params["scope"] = .string(scope)
+            params["scope"] = .string("private")
             params["dry_run"] = .bool(dryRun)
             let data = try await request(method: "start_scan", params: params)
             scanJobID = try decodeResult(JobStartResult.self, from: data).jobID
@@ -740,12 +720,6 @@ final class CoreClient: ObservableObject {
         case "scan_failed":
             scanJobID = nil
             errorMessage = eventError(dictionary) ?? "歷史掃描失敗"
-        case "groups_finished":
-            groups = decodeEventResult([ManagedGroup].self, dictionary: dictionary["result"]) ?? groups
-            operationJobID = nil
-        case "groups_failed":
-            operationJobID = nil
-            errorMessage = eventError(dictionary) ?? "群組讀取失敗"
         case "account_operation_finished":
             operationJobID = nil
             appendLog("帳號操作完成", level: "info")

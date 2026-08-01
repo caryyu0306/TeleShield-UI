@@ -30,11 +30,10 @@ SwiftUI 不直接 import Python，也不直接持有 Telethon client。SwiftUI �
 
 ## 功能
 
-- 多個 Telegram 個人帳號與獨立 Session、設定、名單、群組及記錄
+- 多個 Telegram 個人帳號與獨立 Session、設定、名單及記錄
 - MTProto API ID／Hash、驗證碼與 Telegram 2FA 登入
 - 私訊廣告即時偵測與封鎖
-- 管理員群組廣告偵測與成員移除
-- 歷史私訊／群組掃描、dry-run 預覽、進度與取消
+- 歷史私訊掃描、dry-run 預覽、進度與取消
 - 文字規則、白名單、黑名單與學習模式
 - 本機 Tesseract OCR，支援英文、簡體中文與繁體中文
 - 封鎖記錄、每日／每週報告與 JSON／CSV 匯出
@@ -42,7 +41,7 @@ SwiftUI 不直接 import Python，也不直接持有 Telethon client。SwiftUI �
 - 封鎖後透過 Telegram Bot API 發送通知
 - Menu Bar 常駐、背景防護與 macOS 開機啟動
 
-所有封鎖、踢除與刪除動作都應先使用預覽或確認流程；群組處理需要 Telegram 管理員權限。
+所有封鎖與刪除動作都應先使用預覽或確認流程。
 
 ## Repository map
 
@@ -66,8 +65,9 @@ SwiftUI 不直接 import Python，也不直接持有 Telethon client。SwiftUI �
 - API ID、API Hash、手機號碼、驗證碼、2FA 密碼與 Session 不可提交至 Git、issue、CI log 或聊天訊息。
 - sidecar 會對 RPC event、錯誤與 log 做 credential-like value redaction。
 - Session、設定與記錄放在使用者資料目錄，不放在 App bundle；Session 等同 Telegram 身分憑證。
-- 每個帳號都有獨立的 Session、設定、名單、群組與封鎖記錄。
-- 登出、清除 Session、刪除帳號資料、封鎖、踢除與刪除對話都是可能不可逆的操作。
+- 每個帳號都有獨立的 Session、設定、名單與封鎖記錄。
+- 既有群組設定與歷史群組記錄會保留在本機供相容性使用，但目前版本不再執行群組掃描、群組防護或成員移除。
+- 登出、清除 Session、刪除帳號資料、封鎖與刪除對話都是可能不可逆的操作。
 
 ## 建置需求
 

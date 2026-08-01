@@ -1,128 +1,204 @@
-> 本專案是從 [WAHSUN 的 TeleShield](https://github.com/c92d58/TeleShield) fork 出來的延伸工作。原始 TeleShield 核心、設計與領域邏輯屬於上游作者；本 fork 主要加入 macOS 原生 SwiftUI 桌面介面與 sidecar 整合，並保留原有 attribution 與 MIT License。
+> ## 致上游作者的尊重與感謝
+>
+> 本專案是 fork 自 [WAHSUN（c92d58）所開發的 TeleShield](https://github.com/c92d58/TeleShield)。原作者建立了 TeleShield 的核心概念、Telegram 防護邏輯、垃圾訊息判斷與基礎設計，這些成果屬於上游專案與原作者。本 fork 不抹除、不取代，也不重新主張上游的貢獻；使用或延伸本專案時，請一併保留原作者 attribution 與 MIT License。
+>
+> 本 fork 的工作重點，是在尊重上游成果的前提下，加入 macOS 原生 SwiftUI 桌面介面、Menu Bar 操作方式與本機 sidecar 整合，讓原本的防護能力更容易被一般 macOS 使用者使用。
 
 <div align="center">
   <h1>🛡️ TeleShield</h1>
-  <p><strong>macOS 原生 SwiftUI Telegram 個人帳號防護工具</strong><br>
-  <em>Native SwiftUI shell with a Python/Telethon protection sidecar.</em></p>
+  <p><strong>給 Telegram 個人帳號的 macOS 私訊防護工具</strong><br>
+  減少陌生廣告、推銷與可疑私訊打擾。</p>
   <a href="LICENSE">MIT License</a>
 </div>
 
-## 專案定位
+## TeleShield 是什麼？
 
-本 repository 只提供 macOS SwiftUI 原生桌面路徑：
+TeleShield 是一個在 macOS 上執行的 Telegram 個人帳號防護工具。登入你自己的 Telegram 帳號後，它會在本機協助觀察非聯絡人的一對一私訊，依訊息內容、圖片文字與你設定的名單判斷是否可能是垃圾訊息，並依照防護設定執行封鎖、記錄或清理。
 
-```text
-TeleShield.app
-    │ SwiftUI / AppKit
-    │ line-delimited JSON-RPC over stdin/stdout
-    ▼
-Contents/Helpers/TeleShieldCore
-    │ PyInstaller Python sidecar
-    ▼
-core_service.py → teleshield.py → Telethon → Telegram
-```
+它不是 Telegram 官方 App，也不是群組管理機器人；它是 Telegram 個人帳號的補充防護層，適合不想讓陌生廣告直接進入私人對話的人。
 
-SwiftUI 不直接 import Python，也不直接持有 Telethon client。SwiftUI 負責畫面、狀態與 macOS 整合；`core_service.py` 負責 sidecar 的 IPC、背景工作生命週期；`teleshield.py` 提供 Telegram、帳號、Session、掃描、OCR 與報告核心。
+## 為什麼需要它？
 
-`teleshield.py` 現在是 sidecar 使用的 library，不再提供對外 CLI 入口。
+Telegram 有以「付費訊息」限制陌生人傳訊息的防垃圾訊息方式，但對沒有 Telegram 付費方案、或目前無法使用這項功能的帳號來說，便不能靠這個設定限制非聯絡人私訊。結果是，廣告、投資推銷、賭博、色情、假冒客服或其他可疑內容，仍可能直接出現在你的訊息列表中。
 
-目前是測試版 macOS artifact。DMG 未完成 Apple Developer code signing、notarization 或 stapling，不代表已通過正式發布驗證。
+TeleShield 的目的，就是在這個情境下提供一個本機可控的替代方案：
 
-## 功能
+- 不需要改用另一個 Telegram 帳號。
+- 不需要把訊息交給額外的雲端分析服務。
+- 可以先預覽判斷結果，再決定是否封鎖。
+- 可以用白名單、黑名單與自己的規則調整行為。
 
-- 多個 Telegram 個人帳號與獨立 Session、設定、名單及記錄
-- MTProto API ID／Hash、驗證碼與 Telegram 2FA 登入
-- 私訊廣告即時偵測與封鎖
-- 歷史私訊掃描、dry-run 預覽、進度與取消
-- 文字規則、白名單、黑名單與學習模式
-- 本機 Tesseract OCR，支援英文、簡體中文與繁體中文
-- 封鎖記錄、每日／每週報告與 JSON／CSV 匯出
-- 封鎖後自動刪除一對一私訊
-- 封鎖後透過 Telegram Bot API 發送通知
-- Menu Bar 常駐、背景防護與 macOS 開機啟動
+它不會改變 Telegram 的付費設定，也不保證所有垃圾訊息都能被辨識；它提供的是一層可以自行管理、逐步調整的個人防護。
 
-所有封鎖與刪除動作都應先使用預覽或確認流程。
+## 主要功能
 
-## Repository map
+### 即時防護陌生私訊
 
-| 路徑 | 用途 |
+啟動防護後，TeleShield 會持續處理收到的一對一私訊，但一般垃圾訊息辨識只針對**非聯絡人**：
+
+- 聯絡人不會因為訊息中出現廣告關鍵字而被自動封鎖。
+- 白名單中的對象會被跳過，保留正常對話。
+- 黑名單是你明確指定的例外，會優先依黑名單規則處理。
+- 非聯絡人訊息若符合內建或自訂垃圾訊息規則，啟用即時防護後的預設行為是**直接封鎖對方**，不是只標記或只提醒。
+
+封鎖事件會寫入本機封鎖記錄，之後可以在 App 中查詢、產生報告或匯出。
+
+### 文字與圖片廣告辨識
+
+內建規則會先檢查文字；若非聯絡人的訊息符合任一項預設規則，啟用即時防護後就會直接封鎖。規則是關鍵詞與文字模式，只要命中其中一項就會視為可疑，不是以分數累積或人工審核。
+
+#### 預設封鎖規則
+
+目前內建規則主要涵蓋以下類型：
+
+- **聯絡方式與導流：**要求加入 LINE、微信、WhatsApp 或其他帳號，Telegram `@username`、`t.me` 連結等。
+- **兼職與快速賺錢：**兼職、刷單、日入、月入、躺賺、被動收入、在家工作等。
+- **投資與金融推銷：**投資、理財、帶單、跟單、量化、穩賺、穩健、高回報、高收益等。
+- **色情與成人內容：**色情、A片、成人、裸聊、約炮、援交、包養等。
+- **賭博與博彩：**賭、博、彩、casino、betting 等。
+- **贈品與促銷：**註冊送、免費領、紅包、禮金、優惠碼、推廣碼等。
+- **刷讚與社群操作：**點贊、關注、刷粉、刷讚、漲粉等。
+- **銷售與批發：**售、賣、出、供應、批發、代購、代發等。
+- **英文廣告：**promote、promotion、advertisement、sponsor、click here、earn money、work from home、free crypto、airdrop、giveaway、limited offer、buy now 等。
+
+簡體中文會先轉換成繁體中文再比對，英文規則不分大小寫。這些是預設規則，不會取代白名單；若有正常對話包含上述詞彙，請將對方加入白名單。你也可以在「學習規則」中加入自己的關鍵詞與模式；自訂規則會與內建規則一起使用。
+
+#### OCR 圖像辨識
+
+如果陌生人傳來的是沒有文字的圖片，TeleShield 會對 Telegram 圖片訊息嘗試進行 OCR，支援常見的 **JPEG／JPG 與 PNG** 圖像格式，並辨識：
+
+- 繁體中文
+- 簡體中文
+- English
+
+OCR 讀出的文字會再交給上面的預設規則與你的學習規則判斷；例如圖片中含有投資、賭博或導流內容，命中規則後會依同樣的即時防護流程直接封鎖。OCR 不會因為圖片本身存在就封鎖，必須先讀出文字並命中規則。
+
+OCR 需要 App 中顯示「OCR 可用」才會工作。功能目前針對 Telegram 的圖片訊息；以「檔案／文件」形式傳送的圖片不一定會觸發圖片辨識，且圖片解析度、字體、背景與文字方向都可能影響結果。
+
+### 歷史私訊掃描
+
+如果垃圾訊息在啟用 TeleShield 之前就已經存在，可以掃描近期的陌生私訊。歷史掃描預設是**預覽模式**，只列出可能符合的內容、不會封鎖；確認結果後，關閉預覽並按下處理，才會對匹配的帳號執行封鎖。
+
+### 白名單、黑名單與學習規則
+
+- 白名單：保留你信任的對象，避免被自動處理。
+- 黑名單：對已知的騷擾或垃圾帳號直接採取防護。
+- 學習規則：從你提供的廣告範例建立關鍵詞與模式，讓判斷更符合自己的使用情境。
+
+### 封鎖後的清理與通知
+
+這兩項都是**可選功能，而且預設關閉**：
+
+- **刪除一對一聊天室：**只有在封鎖成功後才會嘗試刪除，不會因為單純掃描或判斷為垃圾訊息就刪除。預設不刪除；開啟後可選擇只刪除自己的紀錄，或嘗試從雙方刪除。Telegram 的權限、對話類型或時間限制可能導致刪除失敗，但封鎖結果仍會保留。
+- **Telegram Bot 封鎖通知：**開啟後，每次私訊封鎖完成，TeleShield 會透過你提供的 Bot Token 將通知傳送到指定 Channel ID。需要先建立 Bot，並讓它具備在指定頻道發送訊息的權限；App 內也提供測試通知按鈕。
+
+刪除與通知不會影響封鎖本身：即使聊天室清理或 Bot 通知失敗，封鎖仍會完成並寫入封鎖記錄。
+
+### 多帳號與 Menu Bar 常駐
+
+可以管理多個自己的 Telegram 個人帳號，每個帳號各自保存登入 Session、設定、名單與封鎖記錄。App 關閉主視窗後仍可留在 macOS Menu Bar，並可選擇在登入 macOS 時自動啟動指定帳號的防護。
+
+## 實際處理規則一覽
+
+以下是啟用防護後最重要的行為：
+
+| 情境 | TeleShield 的行為 |
 |---|---|
-| `swiftui/Sources/TeleShieldApp/` | SwiftUI App、模型、RPC client、Menu Bar |
-| `swiftui/Tests/` | SwiftUI 狀態與格式化測試 |
-| `core_service.py` | stdio JSON-RPC sidecar 與背景工作管理 |
-| `teleshield.py` | Telegram／Telethon 核心 library，無 CLI entry point |
-| `desktop_platform.py` | macOS LaunchAgent startup adapter |
-| `tests/test_core_service.py` | sidecar protocol、登入、worker、事件與 redaction 測試 |
-| `tests/test_teleshield_core.py` | Telegram 核心、帳號隔離、掃描、OCR、名單、報告與 Session 測試 |
-| `scripts/build_swiftui_macos.sh` | App + PyInstaller helper bundle 建置 |
-| `scripts/bundle_tesseract_macos.sh` | 建立可攜式 OCR runtime |
-| `scripts/install_sidecar_dependencies.sh` | 安裝 sidecar 建置依賴 |
-| `.github/workflows/swiftui-build.yml` | Python checks 與 Intel／Apple Silicon SwiftUI DMG build |
+| 聯絡人傳來一般私訊 | 不進行一般垃圾訊息辨識，不自動封鎖 |
+| 白名單對象傳來私訊 | 跳過自動防護 |
+| 黑名單對象傳來一對一私訊 | 優先直接封鎖 |
+| 非聯絡人訊息符合垃圾訊息規則 | **直接封鎖**，並寫入封鎖記錄 |
+| 非聯絡人訊息不符合規則 | 保留訊息，不處理 |
+| 封鎖後刪除聊天室設定關閉 | 只封鎖，不刪除聊天室 |
+| 封鎖後刪除聊天室設定開啟 | 封鎖成功後才嘗試刪除一對一聊天室 |
+| Telegram Bot 通知設定關閉 | 不傳送通知 |
+| Telegram Bot 通知設定開啟 | 封鎖後通知指定 Telegram 頻道 |
+| 歷史掃描的預覽模式開啟 | 只顯示匹配結果，不封鎖 |
+| 歷史掃描關閉預覽並確認處理 | 對匹配的非聯絡人執行封鎖 |
 
-## 安全與資料處理
+## 它會怎麼處理一則私訊？
 
-- 只使用自己控制的 Telegram 個人帳號與裝置。
-- API ID、API Hash、手機號碼、驗證碼、2FA 密碼與 Session 不可提交至 Git、issue、CI log 或聊天訊息。
-- sidecar 會對 RPC event、錯誤與 log 做 credential-like value redaction。
-- Session、設定與記錄放在使用者資料目錄，不放在 App bundle；Session 等同 Telegram 身分憑證。
-- 每個帳號都有獨立的 Session、設定、名單與封鎖記錄。
-- 既有群組設定與歷史群組記錄會保留在本機供相容性使用，但目前版本不再執行群組掃描、群組防護或成員移除。
-- 登出、清除 Session、刪除帳號資料、封鎖與刪除對話都是可能不可逆的操作。
-
-## 建置需求
-
-- macOS 13 或更新版本
-- Xcode／Swift toolchain
-- Python 3.9 以上
-- Homebrew：`tesseract`、`tesseract-lang`、`dylibbundler`、`zlib`、`jpeg-turbo`
-- Telegram MTProto API credentials
-
-安裝 sidecar 依賴：
-
-```bash
-python3 -m pip install -r requirements-sidecar.txt
-```
-
-## 本機建置
-
-先建立 OCR runtime：
-
-```bash
-scripts/bundle_tesseract_macos.sh build/tesseract-runtime
-```
-
-再執行：
-
-```bash
-scripts/build_swiftui_macos.sh
-```
-
-產物為：
+大致流程如下：
 
 ```text
-dist/TeleShieldSwiftUI.app
+收到一對一私訊
+      ↓
+黑名單對象？
+      ├─ 是：直接封鎖 →（若已開啟）刪除對話／發送通知 → 寫入記錄
+      └─ 否
+      ↓
+是否為聯絡人／白名單？
+      ├─ 是：跳過，不處理
+      └─ 否
+      ↓
+文字規則或圖片 OCR 判斷
+      ↓
+符合垃圾訊息條件？
+      ├─ 否：保留訊息，不處理
+      └─ 是：直接封鎖 →（若已開啟）刪除對話／發送通知 → 寫入記錄
 ```
 
-正式交付的 Intel／Apple Silicon DMG 由 GitHub Actions 產生。Action 會驗證 SwiftUI 架構、sidecar 架構、OCR runtime、Info.plist 與 JSON-RPC smoke test。
+判斷是根據規則與設定進行，不是人工審核。即時防護符合條件時會直接封鎖，因此第一次使用時，建議先整理白名單；若要處理既有訊息，則先使用歷史掃描的預覽模式確認結果。
 
-## 測試
+## 開始使用
 
-Python sidecar 與核心測試：
+### 使用條件
+
+- macOS 13 或更新版本。
+- 一個你本人控制的 Telegram 個人帳號。
+- Telegram 的 MTProto API ID 與 API Hash。可以從 [Telegram API tools](https://my.telegram.org/auth?to=apps) 申請。
+
+### 第一次設定
+
+1. 將 `TeleShield.app` 拖到「應用程式」資料夾後開啟。
+2. 選擇「新增 Telegram 帳號」，依畫面輸入 API ID、API Hash 與手機號碼。
+3. 輸入 Telegram 傳送的驗證碼；如果帳號有啟用兩步驟驗證，再輸入 2FA 密碼。
+4. 先將家人、朋友與其他信任的對象加入白名單。
+5. 在總覽頁啟動防護；之後可以從 Menu Bar 查看或停止防護。
+
+API 憑證、驗證碼、2FA 密碼與 Session 都是敏感資料，請只在自己的電腦與自己的帳號中使用，不要貼到聊天、Issue、截圖或公開儲存庫。
+
+### 清理既有垃圾訊息
+
+到「掃描歷史訊息」頁面，先用預覽模式查看結果。確認結果符合預期後，再關閉預覽並執行封鎖。歷史掃描與即時防護使用同一個 Telegram Session，因此掃描前需要先暫停該帳號的即時防護。
+
+## 為什麼需要使用 `xattr` 開啟 App？
+
+目前提供的 macOS DMG 是未經 Apple Developer 簽署、notarization 與 stapling 的測試版產物。從網路下載 App 後，macOS Gatekeeper 可能會在 App 上加上 `com.apple.quarantine` 隔離標記，並顯示「無法確認開發者」或阻止 App 開啟。
+
+`xattr` 是 macOS 內建的 extended attributes 工具。下面的指令只會移除下載隔離標記，不會替 App 簽章、不會替 App 加入新的權限，也不會繞過 Telegram 登入。請只對你信任來源的 App 使用，並先把 App 複製到「應用程式」資料夾。
+
+### 用 `xattr` 開啟 `TeleShield.app`
+
+1. 將 DMG 裡的 `TeleShield.app` 拖到 `/Applications`。
+2. 開啟「終端機」，執行：
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/TeleShield.app"
+   open "/Applications/TeleShield.app"
+   ```
+
+如果你使用的是本機建置版本，App 名稱可能是 `TeleShieldSwiftUI.app`，請改用實際路徑：
 
 ```bash
-python3 -m py_compile teleshield.py desktop_platform.py core_service.py
-python3 -m pytest -q
+xattr -dr com.apple.quarantine "/Applications/TeleShieldSwiftUI.app"
+open "/Applications/TeleShieldSwiftUI.app"
 ```
 
-SwiftUI 測試與 release build：
+`-r` 代表一併處理 App bundle 內的檔案。這個步驟只在 macOS 因下載隔離而拒絕開啟時需要；如果 App 已經能正常開啟，就不必執行。
 
-```bash
-swift test --package-path swiftui
-swift build --package-path swiftui -c release
-```
+## 資料與安全提醒
 
-SwiftUI action 會在 macOS Intel 與 Apple Silicon runner 各自建置，只產生 SwiftUI App 與對應 DMG artifact。
+- TeleShield 只應用於你自己控制的 Telegram 個人帳號。
+- 登入資訊與使用資料以帳號分開保存在本機；Session 等同 Telegram 登入憑證，請不要分享或上傳。
+- 封鎖與刪除對話可能無法復原，請先使用預覽、確認白名單，再啟用自動處理。
+- 「嘗試從雙方刪除」會受 Telegram 權限、對話類型與時間限制影響；刪除失敗不代表封鎖失敗。
+- TeleShield 目前以一對一私訊為主，不會替你管理群組、頻道或其他人的帳號。
+
+## 專案狀態
+
+這是以原作者 TeleShield 為基礎的 macOS fork，目前提供 SwiftUI 桌面介面與 Menu Bar 操作，並整合原有 Telegram 防護核心。現階段的 DMG 仍是未簽署的測試版，使用前請閱讀上方的 `xattr` 與安全提醒。
 
 ## License
 
-本 fork 使用 [MIT License](LICENSE)。請保留上游 TeleShield 作者與原始專案 attribution。
+本 fork 使用 [MIT License](LICENSE)。請保留上游 TeleShield 作者與原始專案的 attribution。

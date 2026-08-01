@@ -540,7 +540,9 @@ private struct ListManagementView: View {
         }
         .teleShieldPageContent()
         .padding(TeleShieldDesign.pagePadding)
-        .task(id: listType) { await client.fetchList(listType, query: query) }
+        .task(id: "\(client.selectedAccountID ?? "")|\(listType)") {
+            await client.fetchList(listType, query: query)
+        }
         .confirmationDialog("移除選取的名單項目？", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
             Button("確認移除", role: .destructive) {
                 Task {

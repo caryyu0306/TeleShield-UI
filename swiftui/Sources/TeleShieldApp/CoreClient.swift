@@ -29,6 +29,7 @@ final class CoreClient: ObservableObject {
     @Published private(set) var scanJobID: String?
     @Published private(set) var scanProgress: [String] = []
     @Published private(set) var scanResult: ScanResult?
+    @Published private(set) var scanAccountID: String?
     @Published private(set) var operationJobID: String?
 
     private var process: Process?
@@ -143,16 +144,27 @@ final class CoreClient: ObservableObject {
     }
 
     func selectAccount(_ accountID: String) async {
+        guard selectedAccountID != accountID else { return }
+        guard !hasActiveScan else {
+            errorMessage = "請先完成或停止目前帳號的歷史掃描，再切換帳號"
+            return
+        }
         await runBusy("切換帳號") {
             // Do not show the previous account's report or block records while
             // the new account is being loaded.
             self.report = nil
             self.blockRecords = []
+            self.whitelist = []
+            self.blacklist = []
             self.eventLog.removeAll()
             self.details = nil
             self.scanSettings = .defaults
             self.moderationPolicy = .defaults
             self.learnedPatterns = .empty
+            self.scanJobID = nil
+            self.scanProgress.removeAll()
+            self.scanResult = nil
+            self.scanAccountID = nil
             _ = try await self.request(method: "select_account", params: ["account_id": .string(accountID)])
             await self.refresh()
         }
@@ -306,11 +318,17 @@ final class CoreClient: ObservableObject {
 
     func fetchList(_ listType: String, query: String = "") async {
         do {
+            guard let accountID = selectedAccountID, !accountID.isEmpty else {
+                if listType == "whitelist" { whitelist = [] } else { blacklist = [] }
+                return
+            }
             let data = try await request(method: "list_entries", params: [
                 "list_type": .string(listType),
                 "query": .string(query),
-            ].merging(accountParams() ?? [:]) { _, new in new })
+                "account_id": .string(accountID),
+            ])
             let rows = try decodeResult([ListEntry].self, from: data)
+            guard selectedAccountID == accountID else { return }
             if listType == "whitelist" { whitelist = rows } else { blacklist = rows }
         } catch { present(error: error) }
     }
@@ -364,10 +382,11 @@ final class CoreClient: ObservableObject {
 
     func learn(_ text: String) async {
         do {
-            var params = accountParams() ?? [:]
+            guard let accountID = selectedAccountID, !accountID.isEmpty else { return }
+            var params: [String: JSONValue] = ["account_id": .string(accountID)]
             params["text"] = .string(text)
             _ = try await request(method: "learn_text", params: params)
-            await refreshAccountData()
+            await refreshAccountData(accountID: accountID)
         } catch { present(error: error) }
     }
 
@@ -509,17 +528,27 @@ final class CoreClient: ObservableObject {
             errorMessage = "請先停止即時防護，再掃描同一帳號的歷史訊息"
             return
         }
+        guard let accountID = selectedAccountID, !accountID.isEmpty else {
+            errorMessage = "請先選取已登入的 Telegram 帳號"
+            return
+        }
         scanStartInFlight = true
+        scanAccountID = accountID
         defer { scanStartInFlight = false }
         do {
             scanProgress.removeAll()
             scanResult = nil
-            var params = accountParams() ?? [:]
+            var params: [String: JSONValue] = ["account_id": .string(accountID)]
             params["scope"] = .string("private")
             params["dry_run"] = .bool(dryRun)
             let data = try await request(method: "start_scan", params: params)
-            scanJobID = try decodeResult(JobStartResult.self, from: data).jobID
-        } catch { present(error: error) }
+            let job = try decodeResult(JobStartResult.self, from: data)
+            guard selectedAccountID == accountID else { return }
+            scanJobID = job.jobID
+        } catch {
+            scanAccountID = nil
+            present(error: error)
+        }
     }
 
     func cancelScan() async {
@@ -530,9 +559,13 @@ final class CoreClient: ObservableObject {
     }
 
     func addFindings(_ findings: [ScanFinding], to listType: String) async {
+        guard let accountID = scanAccountID, selectedAccountID == accountID else {
+            errorMessage = "掃描結果不屬於目前帳號，請重新掃描後再加入名單"
+            return
+        }
         await runBusy("加入名單") {
             for finding in findings {
-                var params = self.accountParams() ?? [:]
+                var params: [String: JSONValue] = ["account_id": .string(accountID)]
                 params["list_type"] = .string(listType)
                 params["user_id"] = .string(finding.userID)
                 params["username"] = .string(finding.name)
@@ -707,18 +740,23 @@ final class CoreClient: ObservableObject {
             errorMessage = error?["message"] as? String ?? "Telegram 登入失敗"
             connectionMessage = "登入失敗"
         case "scan_progress":
+            guard scanEventBelongsToSelectedAccount(dictionary) else { return }
             if let message = dictionary["message"] as? String {
                 scanProgress.append(message)
                 appendLog(message, level: "info")
             }
         case "scan_finished":
-            if let result = decodeEventResult(ScanResult.self, dictionary: dictionary["result"]) {
+            guard scanEventBelongsToSelectedAccount(dictionary) else { return }
+            if let result = decodeEventResult(ScanResult.self, dictionary: dictionary["result"]),
+               result.accountID == nil || result.accountID == scanAccountID {
                 scanResult = result
             }
             scanJobID = nil
             Task { [weak self] in await self?.refresh() }
         case "scan_failed":
+            guard scanEventBelongsToSelectedAccount(dictionary) else { return }
             scanJobID = nil
+            scanAccountID = nil
             errorMessage = eventError(dictionary) ?? "歷史掃描失敗"
         case "account_operation_finished":
             operationJobID = nil
@@ -736,6 +774,11 @@ final class CoreClient: ObservableObject {
         guard let dictionary, JSONSerialization.isValidJSONObject(dictionary) else { return nil }
         guard let data = try? JSONSerialization.data(withJSONObject: dictionary) else { return nil }
         return try? JSONDecoder().decode(Result.self, from: data)
+    }
+
+    private func scanEventBelongsToSelectedAccount(_ dictionary: [String: Any]) -> Bool {
+        guard let accountID = dictionary["account_id"] as? String else { return false }
+        return accountID == selectedAccountID && accountID == scanAccountID
     }
 
     private func eventError(_ dictionary: [String: Any]) -> String? {

@@ -5,7 +5,7 @@ set -euo pipefail
 # Pillow wheel links _imaging against TIFF, JPEG2000, WebP, AVIF, LCMS, and
 # XCB even though this app only needs JPEG and PNG decoding.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 ZLIB_ROOT="$(brew --prefix zlib)"
 JPEG_ROOT="$(brew --prefix jpeg-turbo)"
 

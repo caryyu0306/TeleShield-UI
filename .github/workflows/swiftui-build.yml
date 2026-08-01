@@ -1,4 +1,4 @@
-name: Desktop test builds
+name: SwiftUI test builds
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   tests:
-    name: Python checks
+    name: Python sidecar checks
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -26,95 +26,13 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements-desktop.txt
-      - name: Install Qt runtime libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libegl1
-      - name: Install dependencies
-        run: python -m pip install -r requirements-desktop.txt pytest
+          cache-dependency-path: requirements-sidecar.txt
+      - name: Install sidecar dependencies
+        run: python -m pip install -r requirements-sidecar.txt pytest
       - name: Compile Python sources
-        run: python -m compileall -q teleshield.py desktop_app.py desktop_platform.py core_service.py
-      - name: Run tests
+        run: python -m compileall -q teleshield.py desktop_platform.py core_service.py
+      - name: Run core and sidecar tests
         run: python -m pytest -q
-
-  macos:
-    name: Build ${{ matrix.artifact_name }}
-    needs: tests
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel
-            artifact_name: macOS-intel
-            file_name: macOS-intel.dmg
-          - runner: macos-14
-            artifact_name: macOS-arm
-            file_name: macOS-arm.dmg
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements-desktop.txt
-      - name: Show runner architecture
-        run: uname -m
-      - name: Install Tesseract runtime dependencies
-        run: brew install tesseract tesseract-lang dylibbundler
-      - name: Install desktop dependencies
-        run: python -m pip install -r requirements-desktop.txt
-      - name: Bundle Chinese/English Tesseract runtime
-        run: scripts/bundle_tesseract_macos.sh build/tesseract-runtime
-      - name: Build application bundle
-        run: >-
-          python -m PyInstaller
-          --noconfirm
-          --clean
-          --windowed
-          --name TeleShield
-          --collect-data opencc
-          --add-data "build/tesseract-runtime:tesseract-runtime"
-          desktop_app.py
-      - name: Verify bundled OCR runtime inside app
-        run: |
-          TESSERACT_BIN="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/bin/tesseract' -print -quit)"
-          CHI_SIM_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/chi_sim.traineddata' -print -quit)"
-          CHI_TRA_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/chi_tra.traineddata' -print -quit)"
-          ENG_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/eng.traineddata' -print -quit)"
-          test -n "$TESSERACT_BIN"
-          test -n "$CHI_SIM_DATA"
-          test -n "$CHI_TRA_DATA"
-          test -n "$ENG_DATA"
-          chmod 755 "$TESSERACT_BIN"
-          TESSDATA_PREFIX="$(dirname "$CHI_SIM_DATA")" "$TESSERACT_BIN" --list-langs
-      - name: Report unpacked app size
-        run: |
-          du -sh "dist/TeleShield.app"
-          du -sh "dist/TeleShield.app/Contents/Frameworks" || true
-      - name: Create unsigned DMG
-        env:
-          ARTIFACT_NAME: ${{ matrix.artifact_name }}
-        run: |
-          mkdir -p "dist/dmg-root"
-          cp -R "dist/TeleShield.app" "dist/dmg-root/TeleShield.app"
-          ln -s /Applications "dist/dmg-root/Applications"
-          hdiutil create \
-            -volname "TeleShield ${ARTIFACT_NAME}" \
-            -srcfolder "dist/dmg-root" \
-            -ov \
-            -format UDZO \
-            "dist/${{ matrix.file_name }}"
-      - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.file_name }}
-          if-no-files-found: error
-          retention-days: 14
 
   macos-swiftui:
     name: Build SwiftUI ${{ matrix.artifact_name }}

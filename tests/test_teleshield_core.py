@@ -51,21 +51,6 @@ def test_default_session_dir_honours_override(monkeypatch, tmp_path):
     assert teleshield.default_session_dir() == tmp_path / "data"
 
 
-def test_cli_lists_use_the_same_keys_as_runtime(monkeypatch, tmp_path):
-    configure_temp_storage(monkeypatch, tmp_path)
-
-    asyncio.run(teleshield.manage_list("add", "whitelist", "123456"))
-    asyncio.run(teleshield.manage_list("add", "blacklist", "987654"))
-
-    cfg = teleshield.load_config()
-    assert "whitelist" in cfg
-    assert "blacklist" in cfg
-    assert "whitelist_list" not in cfg
-    assert "blacklist_list" not in cfg
-    assert teleshield.is_whitelisted(123456, cfg)
-    assert teleshield.is_blacklisted(987654, cfg)
-
-
 def test_authenticate_reports_telegram_code_delivery(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
 
@@ -112,7 +97,8 @@ def test_authenticate_reports_telegram_code_delivery(monkeypatch, tmp_path):
     assert teleshield.load_config()["user_id"] == 42
 
 
-def test_desktop_launch_command_starts_hidden():
+def test_macos_launch_command_starts_swiftui_app_hidden(monkeypatch):
+    monkeypatch.setenv("TELESHIELD_STARTUP_APP", "/Applications/TeleShield.app")
     command = application_command()
     assert command[-1] == "--background"
     assert command
@@ -1550,19 +1536,6 @@ def test_concurrent_identity_updates_reject_duplicate_user_id(monkeypatch, tmp_p
     assert sum(item.get("user_id") == 777 for item in teleshield.list_accounts()) == 1
 
 
-def test_cli_main_runs_legacy_migration_before_status(monkeypatch, tmp_path, capsys):
-    configure_temp_storage(monkeypatch, tmp_path)
-    teleshield.SESSION_FILE.write_bytes(b"legacy-session")
-    teleshield.save_config({"user_id": 42, "username": "legacy", "blocked_count": 0})
-    monkeypatch.setattr(teleshield.sys, "argv", ["teleshield.py", "--status"])
-
-    asyncio.run(teleshield.main())
-
-    assert not teleshield.SESSION_FILE.exists()
-    assert len(teleshield.list_accounts()) == 1
-    assert "ID: 42" in capsys.readouterr().out
-
-
 def test_cross_process_identity_updates_reject_one_duplicate(tmp_path):
     teleshield.create_account("account-a", root=tmp_path)
     teleshield.create_account("account-b", root=tmp_path)
@@ -1848,36 +1821,3 @@ def test_running_listener_blocks_local_session_deletion(monkeypatch, tmp_path):
         release.set()
         worker.join(15)
     assert not worker.is_alive()
-
-
-def test_management_dialog_serializes_account_operations(monkeypatch, tmp_path):
-    configure_temp_storage(monkeypatch, tmp_path)
-    teleshield.create_account("account-a")
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-
-    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
-    desktop_app = pytest.importorskip("desktop_app")
-    QApplication = qt_widgets.QApplication
-
-    app = QApplication.instance() or QApplication([])
-    dialog = desktop_app.ManagementDialog(network_enabled=True, account_id="account-a")
-
-    class RunningWorker:
-        @staticmethod
-        def isRunning():
-            return True
-
-    warnings = []
-    monkeypatch.setattr(
-        desktop_app.QMessageBox,
-        "warning",
-        lambda *args: warnings.append(args),
-    )
-    dialog.group_worker = RunningWorker()
-
-    assert dialog._operation_available() is False
-    assert len(warnings) == 1
-
-    dialog.group_worker = None
-    dialog.close()
-    app.processEvents()

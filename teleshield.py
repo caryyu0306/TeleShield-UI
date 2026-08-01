@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
-"""
-Telegram 廣告封鎖工具 — TeleShield 完整版
-────────────────────────────────────
-用法：
-  --setup [api_id] [api_hash] [phone] [code]  首次設定
-  --scan                                       掃描並封鎖
-  --dry-run                                    試掃描
-  --listen                                     即時監聽（後台常駐）
-  --status                                     查看狀態
-  --report [day|week]                          封鎖摘要報告
-  --learn <廣告文字>                            手動標記學習新模式
-  --whitelist add|remove|list <user_id>        白名單管理
-  --blacklist add|remove|list <user_id>        黑名單管理
-  --group-scan                                 掃描群組並踢除廣告
+"""TeleShield Telegram protection core used by the native macOS app.
+
+The SwiftUI shell talks to this module through ``core_service.py``.  The
+module intentionally keeps its reusable account, Telegram, scanning, OCR,
+and reporting implementation in one place, but it no longer exposes a
+command-line entry point.
 """
 
 import asyncio, csv, errno, json, os, random, re, shutil, ssl, sys, tempfile, threading, time
@@ -1046,7 +1038,7 @@ def remove_learned_pattern(kind: str, value: str, account_id: Optional[str] = No
 
 
 def get_scan_settings(cfg: dict = None, account_id: Optional[str] = None) -> dict:
-    """Return validated scan limits for both GUI and CLI callers."""
+    """Return validated scan limits for the SwiftUI sidecar and core callers."""
     cfg = cfg if cfg is not None else load_config(account_id)
     stored = cfg.get("scan_settings", {})
     settings = {}
@@ -1805,77 +1797,7 @@ async def check_photo(client, msg) -> str:
             except OSError:
                 pass
 
-# ──────────── 學習模式 ────────────
-
-async def learn(text: str):
-    """CLI wrapper around the GUI-safe learning API."""
-    try:
-        result = learn_text(text)
-    except ValueError as exc:
-        print(f"❌ {exc}")
-        return
-    print(f"✅ 已學習 {len(result['added_keywords'])} 個關鍵詞 + {len(result['added_patterns'])} 個模式")
-    if result["added_keywords"]:
-        print(f"   關鍵詞: {', '.join(result['added_keywords'])}")
-    if result["added_patterns"]:
-        print(f"   模式: {', '.join(result['added_patterns'][:5])}")
-    print(f"   累計: {result['total_keywords']} 關鍵詞, {result['total_patterns']} 模式")
-
-# ──────────── 白名單/黑名單管理 ────────────
-
-async def manage_list(action: str, list_type: str, user_id_str: str = None):
-    """CLI wrapper around the shared whitelist/blacklist API."""
-    try:
-        if action == "list":
-            rows = list_entries(list_type)
-            if not rows:
-                print(f"📋 {list_type} 名單: 空")
-            else:
-                print(f"📋 {list_type} 名單 ({len(rows)} 人):")
-                for row in rows:
-                    tag = f"@{row['username']}" if row["username"] else ""
-                    print(f"  • {row['user_id']} {tag} ({row['added'] or '?'})")
-            return
-        if not user_id_str:
-            print("❌ 請提供使用者 ID")
-            return
-        if action == "add":
-            upsert_list_entry(list_type, user_id_str, reason="manual")
-            print(f"✅ 已將 {user_id_str} 加入 {list_type} 名單")
-        elif action == "remove":
-            if remove_list_entry(list_type, user_id_str):
-                print(f"✅ 已將 {user_id_str} 從 {list_type} 名單移除")
-            else:
-                print(f"❌ {user_id_str} 不在 {list_type} 名單中")
-        else:
-            print(f"❌ 未知操作: {action}")
-    except ValueError as exc:
-        print(f"❌ {exc}")
-
-# ──────────── 封鎖摘要報告 ────────────
-
-async def report(period: str = "day"):
-    """CLI wrapper around the shared structured report API."""
-    result = build_report(period)
-    if not result["total"]:
-        print(f"📊 {result['label']}: 無封鎖記錄")
-        return
-    print(f"\n📊 封鎖摘要 — {result['label']}")
-    print(f"{'─'*40}")
-    print(f"   總計封鎖: {result['total']} 人")
-    if result["by_source"]:
-        print("   來源:")
-        for source, count in result["by_source"].items():
-            print(f"     • {'私訊' if source == 'private' else '群組'}: {count} 人")
-    print("   廣告類型 Top 5:")
-    for reason, count in result["by_reason"].items():
-        print(f"     • {reason}: {count} 次")
-    if period == "week":
-        print("\n   每日趨勢:")
-        for day, count in result["trend"].items():
-            print(f"     {day}: {count} 人")
-
-# ──────────── 首次設定 ────────────
+# ──────────── Telegram authentication ────────────
 
 @_session_leased
 async def authenticate(
@@ -1900,7 +1822,7 @@ async def _authenticate(
     password_callback,
     status_callback=None,
 ):
-    """Authenticate the personal Telegram client without requiring a CLI prompt."""
+    """Authenticate the personal Telegram client through app callbacks."""
     from telethon import TelegramClient
     from telethon.errors import SessionPasswordNeededError
 
@@ -2115,42 +2037,6 @@ async def _logout_account(remove_credentials: bool = False) -> bool:
     return logged_out
 
 
-async def setup(api_id: str = None, api_hash: str = None, phone: str = None, code: str = None):
-
-    print("\n═══════════════════════════════")
-    print("  TeleShield - 設定")
-    print("═══════════════════════════════\n")
-
-    if not api_id:
-        api_id = input("API ID (從 my.telegram.org/apps 取得): ").strip()
-    else:
-        print(f"API ID: {api_id}")
-    if not api_hash:
-        api_hash = input("API Hash: ").strip()
-    else:
-        print(f"API Hash: {api_hash}")
-    if not phone:
-        phone = input("手機號碼 (含國碼，如 +852****5931): ").strip()
-    else:
-        print(f"手機隱藏")
-
-    try:
-        async def code_callback():
-            return code or await asyncio.to_thread(input, "請輸入驗證碼: ")
-
-        async def password_callback():
-            return await asyncio.to_thread(input, "請輸入兩步驟驗證密碼: ")
-
-        me = await authenticate(api_id, api_hash, phone, code_callback, password_callback)
-        print(f"\n✅ 登入成功！")
-        print(f"   帳號: {me.first_name} (@{me.username or '無'})")
-        print(f"   ID: {me.id}")
-        print("✅ 設定已儲存")
-        return True
-    except Exception as e:
-        print(f"\n❌ 登入失敗: {e}")
-        return False
-
 # ──────────── 歷史訊息掃描核心 ────────────
 
 @_session_leased
@@ -2176,7 +2062,8 @@ async def _scan_history(
 
     This API is UI-friendly: it never prompts on stdin, reports progress through
     ``progress_callback``, and checks ``cancel_event`` between Telegram calls.
-    The existing CLI commands remain available below for backwards compatibility.
+    The app-facing API never prompts on stdin and reports progress through the
+    sidecar event stream.
     """
     from telethon import TelegramClient
     from telethon.tl.functions.channels import EditBannedRequest
@@ -2415,243 +2302,6 @@ async def _scan_history(
             store.ensure()
 
 
-# ──────────── 掃描私訊封鎖 ────────────
-
-@_session_leased
-async def scan_and_block(dry_run: bool = False):
-    from telethon import TelegramClient
-    from telethon.tl.functions.contacts import BlockRequest
-    from telethon.tl.types import User, Message, InputPhoneContact
-    from telethon.tl.functions.contacts import GetContactsRequest
-
-    store = _resolve_account_store()
-    store.ensure()
-    cfg = load_config()
-    if not cfg.get("api_id"):
-        print("❌ 尚未設定，請先執行 --setup")
-        return
-
-    print(f"{'🧪 試運行' if dry_run else '🔍 掃描模式'}")
-    print(f"{'─'*40}")
-
-    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
-    try:
-        await client.start(phone=cfg["phone"])
-        store.ensure()
-
-        contacts = (await client(GetContactsRequest(hash=0))).users
-        contact_ids = {c.id for c in contacts}
-        print(f"📇 聯絡人: {len(contact_ids)} 位")
-
-        now = datetime.now(timezone.utc)
-        scan_settings = get_scan_settings(cfg)
-        dialogs = await client.get_dialogs(limit=scan_settings["private_dialog_limit"])
-
-        blocked = 0
-        skipped = 0
-
-        for dialog in dialogs:
-            entity = dialog.entity
-            if not isinstance(entity, User) or entity.is_self or entity.id in contact_ids or entity.bot:
-                continue
-
-            try:
-                msgs = await client.get_messages(entity, limit=scan_settings["private_message_limit"])
-            except:
-                continue
-
-            spam_found = False
-            spam_text = ""
-            for msg in msgs:
-                if not msg:
-                    continue
-                if msg.date and msg.date < now - timedelta(days=scan_settings["private_days"]):
-                    continue
-                msg_text = msg.text or ""
-                if is_spam(msg_text, cfg):
-                    spam_found = True
-                    spam_text = msg_text[:120]
-                    break
-                if msg.photo:
-                    ocr_text = await check_photo(client, msg)
-                    if ocr_text and is_spam(ocr_text, cfg):
-                        spam_found = True
-                        spam_text = f"[OCR] {ocr_text[:100]}"
-                        break
-
-            if not spam_found:
-                continue
-
-            name = f"{entity.first_name or ''} {entity.last_name or ''}".strip()
-            uname = f"@{entity.username}" if entity.username else ""
-            print(f"\n  ⚠️  廣告: {name} {uname}")
-            print(f"      {spam_text[:120]}")
-
-            if dry_run:
-                skipped += 1
-                continue
-
-            try:
-                deletion = await block_private_user(
-                    client,
-                    entity,
-                    name,
-                    spam_text,
-                    "scan",
-                    cfg,
-                )
-                blocked += 1
-                print(f"      ✅ 封鎖")
-                if deletion and not deletion["succeeded"]:
-                    print(f"      ⚠️ 封鎖成功，但刪除私訊紀錄失敗: {deletion.get('error', '未知錯誤')}")
-            except Exception as e:
-                print(f"      ❌ 失敗: {e}")
-
-        print(f"\n{'─'*40}")
-        print(f"結果: 已處理 {blocked+skipped}")
-        if not dry_run and blocked > 0:
-            cfg["blocked_count"] = cfg.get("blocked_count", 0) + blocked
-        cfg["last_scan"] = now.isoformat()
-        save_config(cfg)
-    except Exception as e:
-        print(f"\n❌ 錯誤: {e}")
-    finally:
-        try:
-            await client.disconnect()
-        finally:
-            store.ensure()
-
-# ──────────── 掃描群組踢除 ────────────
-
-@_session_leased
-async def scan_groups(dry_run: bool = False):
-    """掃描群組訊息，踢除發廣告的成員"""
-    from telethon import TelegramClient
-    from telethon.tl.functions.channels import EditBannedRequest
-    from telethon.tl.types import ChatBannedRights, User, Chat, Channel
-    from telethon.tl.functions.contacts import GetContactsRequest
-    from telethon.errors import UserAdminInvalidError
-
-    store = _resolve_account_store()
-    store.ensure()
-    cfg = load_config()
-    if not cfg.get("api_id"):
-        print("❌ 尚未設定")
-        return
-
-    print(f"{'🧪 試運行' if dry_run else '👥 群組掃描模式'}")
-    print(f"{'─'*40}")
-
-    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
-    try:
-        await client.start(phone=cfg["phone"])
-        store.ensure()
-        me = await client.get_me()
-        now = datetime.now(timezone.utc)
-        scan_settings = get_scan_settings(cfg)
-
-        # 白名單聯絡人
-        contacts = (await client(GetContactsRequest(hash=0))).users
-        contact_ids = {c.id for c in contacts}
-
-        dialogs = await client.get_dialogs(limit=scan_settings["group_dialog_limit"])
-        groups = []
-        for d in dialogs:
-            if isinstance(d.entity, (Chat, Channel)) and not d.entity.broadcast:
-                if not is_group_enabled(d.entity.id, cfg):
-                    continue
-                # 檢查是否為管理員
-                try:
-                    participant = await client.get_permissions(d.entity, me.id)
-                    if participant and participant.is_admin:
-                        groups.append(d)
-                except:
-                    pass
-
-        if not groups:
-            print("⚠️  沒有可管理的群組（需要是管理員）")
-            return
-
-        print(f"👥 管理中的群組: {len(groups)}")
-        kicked = 0
-        total_scanned = 0
-
-        for dialog in groups:
-            entity = dialog.entity
-            title = getattr(entity, "title", "未知群組")
-            try:
-                msgs = await client.get_messages(entity, limit=scan_settings["group_message_limit"])
-            except:
-                continue
-
-            for msg in msgs:
-                if not msg or not msg.sender_id:
-                    continue
-                if msg.sender_id == me.id:
-                    continue
-                if msg.sender_id in contact_ids:
-                    continue
-                if is_whitelisted(msg.sender_id, cfg):
-                    continue
-                if msg.date and msg.date < now - timedelta(days=scan_settings["group_days"]):
-                    continue
-
-                # 檢測廣告
-                msg_text = msg.text or ""
-                spam_reason = ""
-
-                if is_spam(msg_text, cfg):
-                    spam_reason = msg_text[:100]
-                elif msg.photo:
-                    ocr_text = await check_photo(client, msg)
-                    if ocr_text and is_spam(ocr_text, cfg):
-                        spam_reason = f"[OCR] {ocr_text[:80]}"
-
-                if not spam_reason:
-                    continue
-
-                total_scanned += 1
-                try:
-                    sender = await client.get_entity(msg.sender_id)
-                    sname = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
-                except:
-                    sname = str(msg.sender_id)
-
-                print(f"\n  ⚠️  [{title}] {sname}")
-                print(f"     {spam_reason[:100]}")
-
-                if dry_run:
-                    continue
-
-                # 踢除 (ban + kick)
-                try:
-                    rights = ChatBannedRights(
-                        until_date=None,
-                        view_messages=True
-                    )
-                    await client(EditBannedRequest(entity, msg.sender_id, rights))
-                    kicked += 1
-                    log_block(msg.sender_id, sname, spam_reason, "group")
-                    print(f"     ✅ 已踢除")
-                    await asyncio.sleep(1)  # 避免 rate limit
-                except UserAdminInvalidError:
-                    print(f"     ⚠️ 無法踢除（權限不足）")
-                except Exception as e:
-                    print(f"     ❌ 踢除失敗: {e}")
-
-        print(f"\n{'─'*40}")
-        print(f"結果: 掃描 {total_scanned} 條, {'已踢除' if not dry_run else '試運行'}: {kicked if not dry_run else total_scanned}")
-        if not dry_run and kicked > 0:
-            cfg["kicked_count"] = cfg.get("kicked_count", 0) + kicked
-        save_config(cfg)
-    except Exception as e:
-        print(f"\n❌ 錯誤: {e}")
-    finally:
-        try:
-            await client.disconnect()
-        finally:
-            store.ensure()
-
 # ──────────── 即時監聽（私訊+群組） ────────────
 
 async def listen(
@@ -2882,80 +2532,5 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
 
     return True
 
-# ──────────── 主程式 ────────────
-
-async def main():
-    try:
-        ensure_account_registry()
-    except Exception as exc:
-        print(f"❌ 帳號資料初始化／遷移失敗：{exc}")
-        return
-    if len(sys.argv) < 2:
-        print("TeleShield — Telegram 廣告封鎖工具")
-        print(f"{'─'*35}")
-        print("  --setup                   首次設定")
-        print("  --scan                    掃描並封鎖私訊")
-        print("  --dry-run                 試掃描")
-        print("  --listen                  即時監聽（後台常駐）")
-        print("  --group-scan              掃描群組並踢除廣告")
-        print("  --status                  查看狀態")
-        print("  --report [day|week]       封鎖摘要報告")
-        print("  --learn <文字>            手動標記學習新模式")
-        print("  --whitelist add|remove|list [id]")
-        print("  --blacklist add|remove|list [id]")
-        return
-
-    cmd = sys.argv[1]
-
-    if cmd == "--setup":
-        await setup(
-            sys.argv[2] if len(sys.argv) > 2 else None,
-            sys.argv[3] if len(sys.argv) > 3 else None,
-            sys.argv[4] if len(sys.argv) > 4 else None,
-            sys.argv[5] if len(sys.argv) > 5 else None,
-        )
-    elif cmd == "--scan":
-        await scan_and_block(dry_run=False)
-    elif cmd == "--dry-run":
-        await scan_and_block(dry_run=True)
-    elif cmd == "--group-scan":
-        await scan_groups(dry_run="--dry" in sys.argv or "dry" in sys.argv)
-    elif cmd == "--listen":
-        await listen()
-    elif cmd == "--status":
-        cfg = load_config()
-        if not cfg:
-            print("❌ 尚未設定")
-            return
-        log = load_block_log()
-        recent = len([b for b in log.get("blocks", []) if datetime.fromisoformat(b["time"]) > datetime.now(timezone.utc) - timedelta(days=1)])
-        print("📊 TeleShield 狀態")
-        print(f"{'─'*30}")
-        print(f"  帳號: {cfg.get('username','?')} (ID: {cfg.get('user_id','?')})")
-        print(f"  累計封鎖私訊: {cfg.get('blocked_count',0)} 人")
-        print(f"  累計踢除群組: {cfg.get('kicked_count',0)} 人")
-        print(f"  今日封鎖: {recent} 人")
-        print(f"  白名單: {len(cfg.get('whitelist',{}))} 人")
-        print(f"  黑名單: {len(cfg.get('blacklist',{}))} 人")
-        print(f"  學習模式: {len(cfg.get('learned_patterns',{}).get('keywords',[]))} 關鍵詞")
-        print(f"  最後掃描: {cfg.get('last_scan','從未')}")
-    elif cmd == "--report":
-        period = sys.argv[2] if len(sys.argv) > 2 else "day"
-        await report(period)
-    elif cmd == "--learn":
-        text = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
-        if not text:
-            print("❌ 請提供廣告文字，例如: --learn 加我微信 xxx 投資穩賺")
-            return
-        await learn(text)
-    elif cmd in ("--whitelist", "--blacklist"):
-        list_type = cmd.replace("--", "")
-        action = sys.argv[2] if len(sys.argv) > 2 else "list"
-        user_id = sys.argv[3] if len(sys.argv) > 3 else None
-        await manage_list(action, list_type, user_id)
-    else:
-        print(f"❌ 未知指令: {cmd}")
-        print("執行不加參數查看全部指令")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# This module is intentionally library-only.  The macOS SwiftUI app starts
+# ``core_service.py`` as the only supported executable entry point.

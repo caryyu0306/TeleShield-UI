@@ -3,19 +3,18 @@ import SwiftUI
 
 private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case overview = "總覽"
-    case protection = "防護與掃描"
+    case historyScan = "掃描歷史訊息"
     case lists = "白名單／黑名單"
     case rules = "學習規則"
     case reports = "報告"
     case records = "封鎖記錄"
-    case groups = "群組管理"
     case settings = "全域設定"
     case accounts = "帳號"
 
     var id: String { rawValue }
 
     static var workspaceCases: [AppSection] {
-        [.overview, .protection, .lists, .rules, .reports, .records, .groups]
+        [.overview, .historyScan, .lists, .rules, .reports, .records]
     }
 
     static var managementCases: [AppSection] {
@@ -24,12 +23,11 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     var icon: String {
         switch self {
         case .overview: return "rectangle.3.group"
-        case .protection: return "shield.lefthalf.filled"
+        case .historyScan: return "magnifyingglass.circle"
         case .lists: return "person.2.badge.gearshape"
         case .rules: return "text.magnifyingglass"
         case .reports: return "chart.bar.xaxis"
         case .records: return "list.bullet.rectangle"
-        case .groups: return "person.3"
         case .settings: return "gearshape"
         case .accounts: return "person.crop.circle"
         }
@@ -47,8 +45,10 @@ struct ContentView: View {
             sidebar
         } detail: {
             VStack(spacing: 0) {
-                CurrentAccountBar(client: client)
-                Divider()
+                if section != .settings && section != .accounts {
+                    CurrentAccountBar(client: client)
+                    Divider()
+                }
                 detailView
             }
         }
@@ -79,12 +79,15 @@ struct ContentView: View {
         List(selection: $section) {
             Section("工作帳號") {
                 ForEach(client.status?.accounts ?? []) { account in
-                    Button {
-                        Task { await client.selectAccount(account.id) }
-                    } label: {
-                        AccountRow(account: account, selected: client.selectedAccount?.id == account.id)
-                    }
-                    .buttonStyle(.plain)
+                    SidebarAccountRow(
+                        account: account,
+                        selected: client.selectedAccount?.id == account.id,
+                        isBusy: client.isBusy,
+                        onSelect: { Task { await client.selectAccount(account.id) } },
+                        onToggleProtection: { enabled in
+                            Task { await client.setProtection(accountID: account.id, enabled: enabled) }
+                        }
+                    )
                 }
                 Button {
                     Task {
@@ -137,12 +140,11 @@ struct ContentView: View {
     private var detailView: some View {
         switch section ?? .overview {
         case .overview: OverviewView(client: client, showLogin: $showLogin)
-        case .protection: ProtectionView(client: client, showLogin: $showLogin)
+        case .historyScan: HistoryScanViewPage(client: client, showLogin: $showLogin)
         case .lists: ListManagementView(client: client)
         case .rules: RulesView(client: client)
         case .reports: ReportView(client: client)
         case .records: BlockRecordsView(client: client)
-        case .groups: GroupsView(client: client)
         case .settings: GlobalSettingsView(client: client)
         case .accounts: AccountsView(client: client, showLogin: $showLogin)
         }
@@ -186,7 +188,7 @@ private struct OverviewView: View {
                     .disabled(client.isBusy)
                 }
                 if let account = client.selectedAccount, account.configured {
-                    ProtectionSummary(client: client, account: account, showLogin: $showLogin)
+                    ProtectionSummary(account: account)
                     EventLogCard(client: client)
                 } else {
                     OnboardingCard(client: client, showLogin: $showLogin)
@@ -200,29 +202,20 @@ private struct OverviewView: View {
     }
 }
 
-private struct ProtectionView: View {
+private struct HistoryScanViewPage: View {
     @ObservedObject var client: CoreClient
     @Binding var showLogin: Bool
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                PageHeader(title: "防護與掃描", subtitle: "即時防護與歷史掃描共用同一個 Telegram Session，不能同時執行") {
-                    if client.selectedAccount?.configured == true {
-                        Button {
-                            Task {
-                                if client.selectedAccount?.running == true { await client.stopProtection() }
-                                else { await client.startProtection() }
-                            }
-                        } label: {
-                            Label(client.selectedAccount?.running == true ? "停止防護" : "啟動防護", systemImage: client.selectedAccount?.running == true ? "stop.fill" : "play.fill")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(client.isBusy)
-                    }
+                PageHeader(
+                    title: "掃描歷史訊息",
+                    subtitle: "掃描目前帳號的歷史私訊，可先預覽結果再決定是否處理"
+                ) {
+                    EmptyView()
                 }
                 if let account = client.selectedAccount, account.configured {
-                    ProtectionSummary(client: client, account: account, showLogin: $showLogin)
                     HistoryScanView(client: client)
                 } else {
                     OnboardingCard(client: client, showLogin: $showLogin)
@@ -234,9 +227,7 @@ private struct ProtectionView: View {
 }
 
 private struct ProtectionSummary: View {
-    @ObservedObject var client: CoreClient
     let account: AccountSummary
-    @Binding var showLogin: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -250,13 +241,10 @@ private struct ProtectionSummary: View {
                     if let userID = account.userID { Text("Telegram ID：\(userID)").font(.caption).foregroundStyle(.tertiary) }
                 }
                 Spacer()
-                Button("重新登入") { showLogin = true }
-                    .disabled(account.running || client.isBusy)
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
                 MetricCard(title: "24 小時封鎖", value: "\(account.recentBlockCount)", icon: "calendar")
                 MetricCard(title: "累計私訊封鎖", value: "\(account.blockedCount)", icon: "hand.raised")
-                MetricCard(title: "累計群組處理", value: "\(account.kickedCount)", icon: "person.3")
                 MetricCard(title: "白名單", value: "\(account.whitelistCount)", icon: "checkmark.shield")
                 MetricCard(title: "黑名單", value: "\(account.blacklistCount)", icon: "nosign")
                 MetricCard(title: "學習關鍵詞", value: "\(account.learnedKeywordCount)", icon: "text.magnifyingglass")
@@ -275,7 +263,7 @@ private struct OnboardingCard: View {
         VStack(alignment: .leading, spacing: 14) {
             Label("先建立一個 Telegram 帳號", systemImage: "person.crop.circle.badge.plus")
                 .font(.title2.bold())
-            Text("每個帳號都有獨立 Session、設定、名單、群組與封鎖記錄。建立後再進入登入流程。")
+            Text("每個帳號都有獨立 Session、設定、名單與封鎖記錄。建立後再進入登入流程。")
                 .foregroundStyle(.secondary)
             Button {
                 Task {
@@ -351,7 +339,6 @@ private struct EventLogCard: View {
 
 private struct HistoryScanView: View {
     @ObservedObject var client: CoreClient
-    @State private var scope = "private"
     @State private var dryRun = true
     @State private var showApplyConfirmation = false
     @State private var showListConfirmation: String?
@@ -359,7 +346,7 @@ private struct HistoryScanView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack {
-                Label("歷史訊息掃描", systemImage: "magnifyingglass.circle")
+                Label("掃描歷史訊息", systemImage: "magnifyingglass.circle")
                     .font(.title3.bold())
                 Spacer()
                 if client.hasActiveScan {
@@ -368,16 +355,14 @@ private struct HistoryScanView: View {
                 }
             }
             HStack {
-                Picker("範圍", selection: $scope) {
-                    Text("私訊（\(client.scanSettings.privateDialogLimit) 對話／\(client.scanSettings.privateMessageLimit) 訊息）").tag("private")
-                    Text("群組（\(client.scanSettings.groupDialogLimit) 群組／\(client.scanSettings.groupMessageLimit) 訊息）").tag("group")
-                }
-                .frame(maxWidth: 430)
-                Toggle("預覽模式（不封鎖／不踢除）", isOn: $dryRun)
+                Text("私訊（\(client.scanSettings.privateDialogLimit) 對話／\(client.scanSettings.privateMessageLimit) 訊息）")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Toggle("預覽模式（不封鎖）", isOn: $dryRun)
             }
             HStack {
                 Button(dryRun ? "開始預覽" : "開始處理") {
-                    if dryRun { Task { await client.startScan(scope: scope, dryRun: true) } }
+                    if dryRun { Task { await client.startScan(dryRun: true) } }
                     else { showApplyConfirmation = true }
                 }
                 .buttonStyle(.borderedProminent)
@@ -412,7 +397,6 @@ private struct HistoryScanView: View {
                     HStack {
                         Text(finding.name).fontWeight(.medium)
                         Text(finding.userID).font(.caption.monospaced()).foregroundStyle(.secondary)
-                        if let group = finding.group { Text(group).font(.caption).foregroundStyle(.secondary) }
                         Spacer()
                         Text(finding.reason).font(.caption).lineLimit(1).foregroundStyle(.secondary)
                     }
@@ -421,11 +405,11 @@ private struct HistoryScanView: View {
         }
         .padding(18)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-        .confirmationDialog("即將對 Telegram 執行封鎖／踢除", isPresented: $showApplyConfirmation, titleVisibility: .visible) {
-            Button("確認開始處理", role: .destructive) { Task { await client.startScan(scope: scope, dryRun: false) } }
+        .confirmationDialog("即將對 Telegram 執行私訊封鎖", isPresented: $showApplyConfirmation, titleVisibility: .visible) {
+            Button("確認開始處理", role: .destructive) { Task { await client.startScan(dryRun: false) } }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("這會對掃描匹配的帳號執行實際處理，並寫入封鎖記錄。建議先用預覽模式確認結果。")
+            Text("這會對掃描匹配的私訊帳號執行封鎖，並寫入封鎖記錄。建議先用預覽模式確認結果。")
         }
         .confirmationDialog("將掃描發現加入名單", isPresented: Binding(get: { showListConfirmation != nil }, set: { if !$0 { showListConfirmation = nil } }), titleVisibility: .visible) {
             Button("確認加入") {
@@ -670,7 +654,7 @@ private struct BlockRecordsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            PageHeader(title: "封鎖記錄", subtitle: "查找私訊與群組處理歷史，必要時匯出交接或稽核") {
+            PageHeader(title: "封鎖記錄", subtitle: "查找封鎖處理歷史，必要時匯出交接或稽核") {
                 Menu("匯出") {
                     Button("JSON") { export("json") }
                     Button("CSV") { export("csv") }
@@ -681,7 +665,6 @@ private struct BlockRecordsView: View {
                 Picker("來源", selection: $source) {
                     Text("全部").tag("all")
                     Text("私訊").tag("private")
-                    Text("群組").tag("group")
                 }
                 .frame(width: 120)
                 Button("重新整理") { Task { await client.fetchBlockRecords(query: query, source: source) } }
@@ -707,41 +690,6 @@ private struct BlockRecordsView: View {
     }
 }
 
-private struct GroupsView: View {
-    @ObservedObject var client: CoreClient
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            PageHeader(title: "群組管理", subtitle: "只掃描你有管理權限且明確啟用的群組") {
-                Button("從 Telegram 重新讀取") { Task { await client.discoverGroups() } }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!client.canModifySelectedAccount || client.isBusy)
-            }
-            if client.operationJobID != nil {
-                ProgressView("正在讀取群組…")
-            }
-            List(client.groups) { group in
-                HStack {
-                    Image(systemName: "person.3.fill").foregroundStyle(.blue)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(group.title).fontWeight(.medium)
-                        Text("ID \(group.groupID)  \(group.username.isEmpty ? "" : "@\(group.username)")")
-                            .font(.caption.monospaced()).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Text(group.permission.isEmpty ? "管理員／建立者" : group.permission).font(.caption).foregroundStyle(.secondary)
-                    Toggle("啟用", isOn: Binding(get: { group.enabled }, set: { value in Task { await client.setGroupEnabled(group.id, enabled: value) } }))
-                        .toggleStyle(.switch)
-                        .frame(width: 100)
-                }
-            }
-            .listStyle(.inset)
-        }
-        .padding(28)
-        .task { await client.refreshAccountData() }
-    }
-}
-
 private struct GlobalSettingsView: View {
     @ObservedObject var client: CoreClient
 
@@ -750,7 +698,7 @@ private struct GlobalSettingsView: View {
             Section("開機啟動") {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle("登入系統時自動啟動 TeleShield", isOn: Binding<Bool>(get: { client.startupEnabled }, set: { value in Task { await client.setStartup(value) } }))
-                    Toggle("啟用自動啟動防護", isOn: Binding<Bool>(
+                    Toggle("啟用自動防護之帳號", isOn: Binding<Bool>(
                         get: { !clientAutoStartAccountIDs.isEmpty },
                         set: { enabled in
                             let ids: [String] = enabled
@@ -764,17 +712,29 @@ private struct GlobalSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     ForEach(client.status?.accounts ?? []) { account in
-                        Toggle(account.label, isOn: Binding<Bool>(
-                            get: { clientAutoStartAccountIDs.contains(account.id) },
-                            set: { enabled in updateAutoStart(accountID: account.id, enabled: enabled) }
-                        ))
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(account.label)
+                                Text(account.configured ? (account.phoneMasked.isEmpty ? "電話未提供" : account.phoneMasked) : "尚未登入")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Toggle("", isOn: Binding<Bool>(
+                                get: { clientAutoStartAccountIDs.contains(account.id) },
+                                set: { enabled in updateAutoStart(accountID: account.id, enabled: enabled) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .accessibilityLabel("\(account.label) 自動防護")
+                        }
                         .help(account.configured ? account.accountIdentifier : "尚未登入")
                         .disabled(!account.configured)
                     }
                 }
             }
             Section("App 行為") {
-                Text("關閉視窗只會隱藏到 Menu Bar，不會停止防護；要停止請使用防護頁或 Menu Bar。")
+                Text("關閉視窗只會隱藏到 Menu Bar，不會停止防護；要停止請使用左側帳號列表或 Menu Bar。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -914,7 +874,7 @@ private struct AccountDetailsSettingsView: View {
                     }
                     .disabled(!policy.deletePrivateHistoryAfterBlock)
 
-                    Text("只套用於一對一私訊；群組與頻道不會刪除。試運行永遠不會執行刪除。封鎖成功後才會嘗試刪除，刪除失敗不會取消封鎖。")
+                    Text("只套用於一對一私訊。試運行永遠不會執行刪除。封鎖成功後才會嘗試刪除，刪除失敗不會取消封鎖。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -971,7 +931,7 @@ private struct AccountDetailsSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("只通知私訊封鎖，不通知群組踢除；此開關不會影響帳戶防護啟動。Bot 必須具備在指定頻道發送訊息的權限。")
+                    Text("只通知私訊封鎖；此開關不會影響帳戶防護啟動。Bot 必須具備在指定頻道發送訊息的權限。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -980,9 +940,6 @@ private struct AccountDetailsSettingsView: View {
                     ScanStepper(title: "私訊對話數", value: $scanSettings.privateDialogLimit, range: 1...100)
                     ScanStepper(title: "每個私訊訊息數", value: $scanSettings.privateMessageLimit, range: 1...100)
                     ScanStepper(title: "私訊日期範圍", value: $scanSettings.privateDays, range: 1...365)
-                    ScanStepper(title: "群組數", value: $scanSettings.groupDialogLimit, range: 1...100)
-                    ScanStepper(title: "每個群組訊息數", value: $scanSettings.groupMessageLimit, range: 1...100)
-                    ScanStepper(title: "群組日期範圍", value: $scanSettings.groupDays, range: 1...365)
                     Button("儲存掃描設定") {
                         Task { await client.updateScanSettings(scanSettings, accountID: accountID) }
                     }
@@ -1036,7 +993,7 @@ private struct AccountDetailsSettingsView: View {
             }
             Button("取消", role: .cancel) { pendingEnablePolicy = nil }
         } message: {
-            Text("只會對之後成功封鎖的一對一私訊生效；群組、頻道與試運行不會刪除。")
+            Text("只會對之後成功封鎖的一對一私訊生效；試運行不會刪除。")
         }
         .confirmationDialog("確認嘗試從雙方刪除？", isPresented: $showBothScopeConfirmation, titleVisibility: .visible) {
             Button("確認使用雙方刪除", role: .destructive) {
@@ -1157,7 +1114,7 @@ private struct AccountsView: View {
             }
             Button("取消", role: .cancel) { removalAccountID = nil }
         } message: {
-            Text("若此帳號正在防護，會先停止防護，再刪除它的 Session、設定、名單、群組與封鎖記錄；其他帳號不受影響。")
+            Text("若此帳號正在防護，會先停止防護，再刪除它的 Session、設定、名單與封鎖記錄；其他帳號不受影響。")
         }
         .sheet(item: $detailsAccount) { account in
             AccountDetailsSettingsView(client: client, accountID: account.id)
@@ -1291,7 +1248,7 @@ private struct AccountRow: View {
                 .foregroundStyle(selected ? .blue : .secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(account.label).font(.body.weight(.medium))
-                Text(account.configured ? (account.phoneMasked.isEmpty ? account.username : account.phoneMasked) : "尚未登入")
+                Text(account.configured ? (account.phoneMasked.isEmpty ? "電話未提供" : account.phoneMasked) : "尚未登入")
                     .font(.caption).foregroundStyle(.secondary)
                 AccountStatusBadge(account: account)
             }
@@ -1309,25 +1266,59 @@ private struct AccountRow: View {
     }
 }
 
+private struct SidebarAccountRow: View {
+    let account: AccountSummary
+    let selected: Bool
+    let isBusy: Bool
+    let onSelect: () -> Void
+    let onToggleProtection: (Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: onSelect) {
+                AccountRow(account: account, selected: selected)
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Toggle(
+                "",
+                isOn: Binding(
+                    get: { account.running },
+                    set: { onToggleProtection($0) }
+                )
+            )
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(!account.configured || isBusy)
+            .help(account.configured ? "開啟或關閉\(account.label)的防護" : "請先登入此 Telegram 帳號")
+            .accessibilityLabel("\(account.label) 防護")
+            .accessibilityValue(account.running ? "開啟" : "關閉")
+        }
+    }
+}
+
 private struct CurrentAccountBar: View {
     @ObservedObject var client: CoreClient
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "arrow.left.arrow.right.circle.fill")
+            Image(systemName: "person.crop.circle.fill")
                 .font(.title3)
                 .foregroundStyle(.blue)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("目前工作帳號")
+                Text("目前正在設定的帳號")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let account = client.selectedAccount {
-                    HStack(spacing: 7) {
-                        Text(account.label)
-                            .font(.body.weight(.semibold))
-                        AccountStatusBadge(account: account)
-                    }
+                    Text(account.label)
+                        .font(.body.weight(.semibold))
+                    Text(account.phoneMasked.isEmpty ? "電話未提供" : account.phoneMasked)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    AccountStatusBadge(account: account)
                 } else {
                     Text("尚未選取帳號")
                         .font(.body.weight(.semibold))
@@ -1335,63 +1326,12 @@ private struct CurrentAccountBar: View {
             }
 
             Spacer()
-            AccountSwitcher(client: client)
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
         .accessibilityElement(children: .contain)
-    }
-}
-
-private struct AccountSwitcher: View {
-    @ObservedObject var client: CoreClient
-
-    private var accounts: [AccountSummary] { client.status?.accounts ?? [] }
-    private var isSwitching: Bool { client.busyOperation == "切換帳號" }
-
-    var body: some View {
-        Menu {
-            if accounts.isEmpty {
-                Text("尚未建立 Telegram 帳號")
-            } else {
-                ForEach(accounts) { account in
-                    Button {
-                        guard account.id != client.selectedAccount?.id else { return }
-                        Task { await client.selectAccount(account.id) }
-                    } label: {
-                        Label {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(account.label)
-                                Text(account.accountIdentifier)
-                                    .font(.caption)
-                            }
-                        } icon: {
-                            Image(systemName: account.id == client.selectedAccount?.id ? "checkmark.circle.fill" : "person.crop.circle")
-                        }
-                    }
-                    .disabled(client.isBusy)
-                }
-            }
-        } label: {
-            HStack(spacing: 7) {
-                if isSwitching {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("切換中…")
-                } else {
-                    Image(systemName: "arrow.left.arrow.right")
-                    Text("切換帳號")
-                }
-                Image(systemName: "chevron.down")
-                    .font(.caption.weight(.bold))
-            }
-        }
-        .buttonStyle(.bordered)
-        .disabled(client.isBusy || accounts.isEmpty)
-        .help("切換目前工作帳號")
-        .accessibilityLabel(isSwitching ? "正在切換工作帳號" : "切換目前工作帳號")
     }
 }
 

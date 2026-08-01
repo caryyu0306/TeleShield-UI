@@ -64,7 +64,6 @@ struct AccountSummary: Codable, Identifiable {
     let phoneMasked: String
     let configured: Bool
     let blockedCount: Int
-    let kickedCount: Int
     let recentBlockCount: Int
     let whitelistCount: Int
     let blacklistCount: Int
@@ -86,7 +85,6 @@ struct AccountSummary: Codable, Identifiable {
         case phoneMasked = "phone_masked"
         case configured
         case blockedCount = "blocked_count"
-        case kickedCount = "kicked_count"
         case recentBlockCount = "recent_block_count"
         case whitelistCount = "whitelist_count"
         case blacklistCount = "blacklist_count"
@@ -119,71 +117,21 @@ struct CoreStatus: Codable {
     }
 }
 
-struct ManagedGroup: Codable, Identifiable {
-    let groupID: String
-    let title: String
-    let username: String
-    let permission: String
-    let enabled: Bool
-
-    var id: String { groupID }
-
-    enum CodingKeys: String, CodingKey {
-        case groupID = "id"
-        case title
-        case username
-        case permission
-        case enabled
-    }
-
-    init(groupID: String, title: String, username: String, permission: String, enabled: Bool) {
-        self.groupID = groupID
-        self.title = title
-        self.username = username
-        self.permission = permission
-        self.enabled = enabled
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        if let stringID = try? container.decode(String.self, forKey: .groupID) {
-            groupID = stringID
-        } else if let numericID = try? container.decode(Int64.self, forKey: .groupID) {
-            groupID = String(numericID)
-        } else {
-            groupID = ""
-        }
-        title = (try? container.decode(String.self, forKey: .title)) ?? groupID
-        username = (try? container.decode(String.self, forKey: .username)) ?? ""
-        permission = (try? container.decode(String.self, forKey: .permission)) ?? ""
-        enabled = (try? container.decode(Bool.self, forKey: .enabled)) ?? true
-    }
-}
-
 struct ScanSettings: Codable {
     var privateDialogLimit: Int
     var privateMessageLimit: Int
     var privateDays: Int
-    var groupDialogLimit: Int
-    var groupMessageLimit: Int
-    var groupDays: Int
 
     enum CodingKeys: String, CodingKey {
         case privateDialogLimit = "private_dialog_limit"
         case privateMessageLimit = "private_message_limit"
         case privateDays = "private_days"
-        case groupDialogLimit = "group_dialog_limit"
-        case groupMessageLimit = "group_message_limit"
-        case groupDays = "group_days"
     }
 
     static let defaults = ScanSettings(
         privateDialogLimit: 30,
         privateMessageLimit: 5,
-        privateDays: 14,
-        groupDialogLimit: 50,
-        groupMessageLimit: 20,
-        groupDays: 3
+        privateDays: 14
     )
 }
 
@@ -288,7 +236,6 @@ struct AccountDetails: Codable {
     let accountID: String?
     let loggedIn: Bool
     let hasAPICredentials: Bool
-    let managedGroups: [ManagedGroup]
     let scanSettings: ScanSettings
     let learnedPatterns: LearnedPatterns
     let autoStart: Bool
@@ -300,7 +247,6 @@ struct AccountDetails: Codable {
         case accountID = "account_id"
         case loggedIn = "logged_in"
         case hasAPICredentials = "has_api_credentials"
-        case managedGroups = "managed_groups"
         case scanSettings = "scan_settings"
         case learnedPatterns = "learned_patterns"
         case autoStart = "auto_start"
@@ -456,15 +402,13 @@ struct BlockRecord: Codable, Identifiable {
 struct ScanFinding: Codable, Identifiable {
     let userID: String
     let name: String
-    let group: String?
     let reason: String
 
-    var id: String { "\(userID)-\(group ?? "")-\(reason)" }
+    var id: String { "\(userID)-\(reason)" }
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case name
-        case group
         case reason
     }
 
@@ -478,7 +422,6 @@ struct ScanFinding: Codable, Identifiable {
             userID = ""
         }
         name = (try? container.decode(String.self, forKey: .name)) ?? userID
-        group = try? container.decode(String.self, forKey: .group)
         reason = (try? container.decode(String.self, forKey: .reason)) ?? ""
     }
 }
@@ -488,7 +431,6 @@ struct ScanResult: Codable {
     let dryRun: Bool
     let dialogsSeen: Int
     let dialogsScanned: Int
-    let groupsFound: Int
     let messagesScanned: Int
     let matched: Int
     let acted: Int
@@ -501,7 +443,6 @@ struct ScanResult: Codable {
         case dryRun = "dry_run"
         case dialogsSeen = "dialogs_seen"
         case dialogsScanned = "dialogs_scanned"
-        case groupsFound = "groups_found"
         case messagesScanned = "messages_scanned"
         case matched
         case acted

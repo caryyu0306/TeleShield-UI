@@ -931,9 +931,6 @@ DEFAULT_SCAN_SETTINGS = {
     "private_dialog_limit": 30,
     "private_message_limit": 5,
     "private_days": 14,
-    "group_dialog_limit": 50,
-    "group_message_limit": 20,
-    "group_days": 3,
 }
 
 DEFAULT_MODERATION_POLICY = {
@@ -954,9 +951,6 @@ SCAN_SETTING_BOUNDS = {
     "private_dialog_limit": (1, 100),
     "private_message_limit": (1, 100),
     "private_days": (1, 365),
-    "group_dialog_limit": (1, 100),
-    "group_message_limit": (1, 100),
-    "group_days": (1, 365),
 }
 
 # ──────────── 工具函式 ────────────
@@ -1056,6 +1050,8 @@ def update_scan_settings(updates: dict, account_id: Optional[str] = None) -> dic
     """Validate and persist user-editable scan limits."""
     cfg = load_config(account_id)
     settings = get_scan_settings(cfg)
+    stored = cfg.get("scan_settings", {})
+    legacy_settings = dict(stored) if isinstance(stored, dict) else {}
     for key, value in (updates or {}).items():
         if key not in SCAN_SETTING_BOUNDS:
             continue
@@ -1065,7 +1061,9 @@ def update_scan_settings(updates: dict, account_id: Optional[str] = None) -> dic
         except (TypeError, ValueError):
             continue
         settings[key] = max(low, min(high, value))
-    cfg["scan_settings"] = settings
+    # Keep obsolete group scan keys on disk for backward compatibility, while
+    # exposing and updating only the private-message settings.
+    cfg["scan_settings"] = {**legacy_settings, **settings}
     save_config(cfg, account_id)
     return settings
 
@@ -1539,52 +1537,6 @@ def import_list_entries(path: str, list_type: str, replace: bool = False, accoun
     return imported
 
 
-def merge_managed_groups(groups: list, account_id: Optional[str] = None) -> list:
-    """Merge Telegram discovery results without resetting enable switches."""
-    cfg = load_config(account_id)
-    existing = {str(group.get("id")): dict(group) for group in cfg.get("managed_groups", [])}
-    seen = set()
-    merged = []
-    for group in groups or []:
-        group_id = str(group.get("id"))
-        if group_id in seen or group_id in {"None", ""}:
-            continue
-        seen.add(group_id)
-        old = existing.get(group_id, {})
-        merged.append({**old, **group, "id": group_id, "enabled": old.get("enabled", True)})
-    for group_id, old in existing.items():
-        if group_id not in seen:
-            merged.append(old)
-    cfg["managed_groups"] = merged
-    save_config(cfg, account_id)
-    return merged
-
-
-def set_managed_group_enabled(group_id: str, enabled: bool, account_id: Optional[str] = None) -> bool:
-    cfg = load_config(account_id)
-    group_id = str(group_id)
-    groups = cfg.setdefault("managed_groups", [])
-    for group in groups:
-        if str(group.get("id")) == group_id:
-            group["enabled"] = bool(enabled)
-            save_config(cfg, account_id)
-            return True
-    groups.append({"id": group_id, "title": group_id, "username": "", "enabled": bool(enabled)})
-    save_config(cfg, account_id)
-    return True
-
-
-def is_group_enabled(group_id: str, cfg: dict = None, account_id: Optional[str] = None) -> bool:
-    cfg = cfg if cfg is not None else load_config(account_id)
-    groups = cfg.get("managed_groups") or []
-    if not groups:
-        return bool(cfg.get("listen_scan_groups", True))
-    for group in groups:
-        if str(group.get("id")) == str(group_id):
-            return bool(group.get("enabled", True))
-    return False
-
-
 def clear_local_session(remove_credentials: bool = False, account_id: Optional[str] = None) -> None:
     """Delete one account's local Telegram session and identity fields only."""
     store = _resolve_account_store(account_id)
@@ -1888,11 +1840,9 @@ async def _authenticate(
             "username": me.username,
         })
         cfg.setdefault("blocked_count", 0)
-        cfg.setdefault("kicked_count", 0)
         cfg.setdefault("last_scan", None)
         cfg.setdefault("whitelist", {})
         cfg.setdefault("blacklist", {})
-        cfg.setdefault("managed_groups", [])
         cfg.setdefault("learned_patterns", {"keywords": [], "patterns": []})
         cfg.setdefault("scan_settings", DEFAULT_SCAN_SETTINGS.copy())
         cfg.setdefault(
@@ -1902,7 +1852,6 @@ async def _authenticate(
                 "telegram_notification": dict(DEFAULT_MODERATION_POLICY["telegram_notification"]),
             },
         )
-        cfg.setdefault("listen_scan_groups", True)
         cfg.setdefault("auto_start_protection", False)
         if store.account_id:
             _commit_account_identity_and_config(
@@ -1945,59 +1894,6 @@ async def _authenticate(
             store.ensure()
             if cleanup_failure is not None:
                 raise RuntimeError("Session 清理失敗；授權資料已清空，請手動刪除空檔") from cleanup_failure
-
-
-@_session_leased
-async def discover_managed_groups(account_id: Optional[str] = None) -> list:
-    """Fetch groups for one account where it has moderation privileges."""
-    with account_context(account_id):
-        return await _discover_managed_groups()
-
-
-async def _discover_managed_groups() -> list:
-    """Fetch groups where the current account has moderation privileges."""
-    from telethon import TelegramClient
-    from telethon.tl.types import Chat, Channel
-
-    store = _resolve_account_store()
-    store.ensure()
-    cfg = load_config()
-    if not cfg.get("api_id"):
-        raise RuntimeError("尚未登入 Telegram")
-    client = TelegramClient(str(store.session_file), cfg["api_id"], cfg["api_hash"])
-    connected = False
-    try:
-        await client.connect()
-        connected = True
-        store.ensure()
-        if not await client.is_user_authorized():
-            raise RuntimeError("Telegram Session 已失效，請先重新登入")
-        me = await client.get_me()
-        groups = []
-        for dialog in await client.get_dialogs(limit=100):
-            entity = dialog.entity
-            if not isinstance(entity, (Chat, Channel)) or getattr(entity, "broadcast", False):
-                continue
-            try:
-                permission = await client.get_permissions(entity, me.id)
-            except Exception:
-                continue
-            if not permission or not (permission.is_admin or permission.is_creator):
-                continue
-            groups.append({
-                "id": str(entity.id),
-                "title": getattr(entity, "title", "未命名群組"),
-                "username": getattr(entity, "username", "") or "",
-                "is_creator": bool(getattr(permission, "is_creator", False)),
-                "is_admin": bool(getattr(permission, "is_admin", False)),
-            })
-        return merge_managed_groups(groups)
-    finally:
-        try:
-            if connected:
-                await client.disconnect()
-        finally:
-            store.ensure()
 
 
 @_session_leased
@@ -2058,7 +1954,7 @@ async def _scan_history(
     progress_callback=None,
     cancel_event=None,
 ):
-    """Scan recent private/group history and optionally apply moderation.
+    """Scan recent private history and optionally apply moderation.
 
     This API is UI-friendly: it never prompts on stdin, reports progress through
     ``progress_callback``, and checks ``cancel_event`` between Telegram calls.
@@ -2066,12 +1962,11 @@ async def _scan_history(
     sidecar event stream.
     """
     from telethon import TelegramClient
-    from telethon.tl.functions.channels import EditBannedRequest
-    from telethon.tl.functions.contacts import BlockRequest, GetContactsRequest
-    from telethon.tl.types import Chat, ChatBannedRights, Channel, User
+    from telethon.tl.functions.contacts import GetContactsRequest
+    from telethon.tl.types import User
 
-    if scope not in {"private", "group"}:
-        raise ValueError("scope 必須是 private 或 group")
+    if scope != "private":
+        raise ValueError("目前只支援 private 歷史訊息掃描")
 
     store = _resolve_account_store()
     store.ensure()
@@ -2084,7 +1979,6 @@ async def _scan_history(
         "dry_run": dry_run,
         "dialogs_seen": 0,
         "dialogs_scanned": 0,
-        "groups_found": 0,
         "messages_scanned": 0,
         "matched": 0,
         "acted": 0,
@@ -2199,96 +2093,8 @@ async def _scan_history(
                     except Exception as exc:
                         add_error(f"封鎖失敗（{entity.id}）：{exc}")
                     break
-        else:
-            me = await client.get_me()
-            dialogs = await client.get_dialogs(limit=scan_settings["group_dialog_limit"])
-            groups = []
-            for dialog in dialogs:
-                result["dialogs_seen"] += 1
-                entity = dialog.entity
-                if not isinstance(entity, (Chat, Channel)) or getattr(entity, "broadcast", False):
-                    continue
-                if not is_group_enabled(entity.id, cfg):
-                    continue
-                try:
-                    permissions = await client.get_permissions(entity, me.id)
-                    if permissions and permissions.is_admin:
-                        groups.append(dialog)
-                except Exception as exc:
-                    add_error(f"群組權限讀取失敗（{getattr(entity, 'title', entity.id)}）：{exc}")
-            result["groups_found"] = len(groups)
-            progress(f"找到 {len(groups)} 個可管理群組")
-
-            handled = set()
-            for group_index, dialog in enumerate(groups, 1):
-                if cancelled():
-                    result["cancelled"] = True
-                    break
-                entity = dialog.entity
-                title = getattr(entity, "title", "未知群組")
-                progress(f"掃描群組 {group_index}/{len(groups)}：{title}")
-                try:
-                    messages = await client.get_messages(entity, limit=scan_settings["group_message_limit"])
-                except Exception as exc:
-                    add_error(f"群組讀取失敗（{title}）：{exc}")
-                    continue
-                result["messages_scanned"] += len(messages)
-
-                for message in messages:
-                    if cancelled():
-                        result["cancelled"] = True
-                        break
-                    if (
-                        not message
-                        or not message.sender_id
-                        or message.sender_id == me.id
-                        or message.sender_id in contact_ids
-                        or is_whitelisted(message.sender_id, cfg)
-                    ):
-                        continue
-                    if message.date and message.date < now - timedelta(days=scan_settings["group_days"]):
-                        continue
-
-                    reason = message.text or ""
-                    if not is_spam(reason, cfg) and message.photo:
-                        ocr_text = await check_photo(client, message)
-                        if ocr_text and is_spam(ocr_text, cfg):
-                            reason = f"[OCR] {ocr_text[:80]}"
-                    if not reason or not is_spam(reason, cfg):
-                        continue
-
-                    result["matched"] += 1
-                    try:
-                        sender = await client.get_entity(message.sender_id)
-                        name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
-                    except Exception:
-                        name = str(message.sender_id)
-                    finding = {
-                        "user_id": message.sender_id,
-                        "name": name or str(message.sender_id),
-                        "group": title,
-                        "reason": reason[:100],
-                    }
-                    result["findings"].append(finding)
-                    progress(f"⚠️ 發現群組廣告：{title}／{finding['name']}")
-                    action_key = (entity.id, message.sender_id)
-                    if dry_run or action_key in handled:
-                        continue
-                    handled.add(action_key)
-                    try:
-                        rights = ChatBannedRights(until_date=None, view_messages=True)
-                        await client(EditBannedRequest(entity, message.sender_id, rights))
-                        result["acted"] += 1
-                        log_block(message.sender_id, finding["name"], reason, "group")
-                        progress(f"✅ 已踢除：{finding['name']}（{title}）")
-                    except Exception as exc:
-                        add_error(f"踢除失敗（{message.sender_id}／{title}）：{exc}")
-
         if not dry_run:
-            if scope == "private":
-                cfg["blocked_count"] = cfg.get("blocked_count", 0) + result["acted"]
-            else:
-                cfg["kicked_count"] = cfg.get("kicked_count", 0) + result["acted"]
+            cfg["blocked_count"] = cfg.get("blocked_count", 0) + result["acted"]
             cfg["last_scan"] = now.isoformat()
         else:
             cfg["last_preview"] = now.isoformat()
@@ -2302,7 +2108,7 @@ async def _scan_history(
             store.ensure()
 
 
-# ──────────── 即時監聽（私訊+群組） ────────────
+# ──────────── 即時監聽（私訊） ────────────
 
 async def listen(
     stop_event: Optional[asyncio.Event] = None,
@@ -2317,9 +2123,7 @@ async def listen(
 
 async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=None) -> bool:
     from telethon import TelegramClient
-    from telethon.tl.functions.contacts import BlockRequest
-    from telethon.tl.functions.channels import EditBannedRequest
-    from telethon.tl.types import User, Message, Chat, Channel, ChatBannedRights
+    from telethon.tl.types import User
     from telethon.tl.functions.contacts import GetContactsRequest
 
     store = _resolve_account_store()
@@ -2331,7 +2135,6 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
 
     print("👂 TeleShield 即時監聽啟動中...")
     print("    ✅ 私訊廣告 → 自動封鎖")
-    print("    👥 群組廣告 → 自動踢除（管理員身份）")
     print("    📸 OCR 支援 → 純圖片廣告也辨識")
     print("    按 Ctrl+C 停止\n")
 
@@ -2350,7 +2153,6 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
         sender_id = msg.sender_id
         chat = await event.get_chat()
         sender = await event.get_sender()
-        now = datetime.now(timezone.utc)
 
         # 跳過自己
         if hasattr(sender, 'is_self') and sender.is_self:
@@ -2358,25 +2160,22 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
 
         # 檢查黑名單（無論在哪）
         if is_blacklisted(sender_id, cfg):
+            if not isinstance(chat, User):
+                return
             try:
-                if isinstance(chat, (Chat, Channel)):
-                    rights = ChatBannedRights(until_date=None, view_messages=True)
-                    await client(EditBannedRequest(chat, sender_id, rights))
-                else:
-                    private_entity = chat if isinstance(chat, User) else sender
-                    name = f"{getattr(private_entity, 'first_name', '') or ''} {getattr(private_entity, 'last_name', '') or ''}".strip()
-                    deletion = await block_private_user(
-                        client,
-                        private_entity,
-                        name or str(sender_id),
-                        "黑名單",
-                        "blacklist",
-                        cfg,
-                    )
-                    cfg["blocked_count"] = cfg.get("blocked_count", 0) + 1
-                    save_config(cfg)
-                    if deletion and not deletion["succeeded"]:
-                        print(f"     ⚠️ 黑名單封鎖成功，但刪除私訊紀錄失敗: {deletion.get('error', '未知錯誤')}")
+                name = f"{getattr(chat, 'first_name', '') or ''} {getattr(chat, 'last_name', '') or ''}".strip()
+                deletion = await block_private_user(
+                    client,
+                    chat,
+                    name or str(sender_id),
+                    "黑名單",
+                    "blacklist",
+                    cfg,
+                )
+                cfg["blocked_count"] = cfg.get("blocked_count", 0) + 1
+                save_config(cfg)
+                if deletion and not deletion["succeeded"]:
+                    print(f"     ⚠️ 黑名單封鎖成功，但刪除私訊紀錄失敗: {deletion.get('error', '未知錯誤')}")
             except Exception as exc:
                 print(f"     ❌ 黑名單處理失敗: {exc}")
             return
@@ -2438,56 +2237,6 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
             except Exception as e:
                 print(f"     ❌ 封鎖失敗: {e}")
             return
-
-        # 群組處理
-        if isinstance(chat, (Chat, Channel)) and not chat.broadcast:
-            if not is_group_enabled(chat.id, cfg):
-                return
-            # 檢查是否為管理員
-            try:
-                me = await client.get_me()
-                perm = await client.get_permissions(chat, me.id)
-                if not perm or not perm.is_admin:
-                    return
-            except:
-                return
-
-            # 跳過管理員
-            try:
-                s_perm = await client.get_permissions(chat, sender_id)
-                if s_perm and (s_perm.is_admin or s_perm.is_creator):
-                    return
-            except:
-                pass
-
-            # 檢測
-            msg_text = msg.text or ""
-            spam_reason = ""
-            if is_spam(msg_text, cfg):
-                spam_reason = msg_text[:100]
-            elif msg.photo:
-                ocr_text = await check_photo(client, msg)
-                if ocr_text and is_spam(ocr_text, cfg):
-                    spam_reason = f"[OCR] {ocr_text[:80]}"
-
-            if not spam_reason:
-                return
-
-            sname = f"{sender.first_name or ''} {sender.last_name or ''}".strip() if hasattr(sender, 'first_name') else str(sender_id)
-            title = getattr(chat, "title", "群組")
-            ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-            print(f"\n[{ts}] 👥 群組廣告 [{title}]: {sname}")
-            print(f"    {spam_reason[:100]}")
-
-            try:
-                rights = ChatBannedRights(until_date=None, view_messages=True)
-                await client(EditBannedRequest(chat, sender_id, rights))
-                cfg["kicked_count"] = cfg.get("kicked_count", 0) + 1
-                save_config(cfg)
-                log_block(sender_id, sname, spam_reason, "group")
-                print(f"     ✅ 已踢除（累計 {cfg['kicked_count']}）")
-            except Exception as e:
-                print(f"     ❌ 踢除失敗: {e}")
 
     try:
         # Do not call ``start(phone=...)`` here: in a windowless packaged app

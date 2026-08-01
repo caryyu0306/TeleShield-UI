@@ -11,7 +11,7 @@ import pytest
 import telethon
 import teleshield
 from desktop_platform import application_command
-from telethon.tl.types import Channel, User
+from telethon.tl.types import User
 
 
 def configure_temp_storage(monkeypatch, tmp_path):
@@ -505,86 +505,6 @@ def test_telegram_notification_failure_does_not_cancel_private_block(monkeypatch
     }
 
 
-def test_scan_history_group_dry_run_reports_finding_without_kicking(monkeypatch, tmp_path):
-    configure_temp_storage(monkeypatch, tmp_path)
-    teleshield.save_config({
-        "api_id": 1234,
-        "api_hash": "[REDACTED]",
-        "user_id": 1,
-        "blocked_count": 0,
-        "kicked_count": 0,
-        "whitelist": {},
-        "blacklist": {},
-    })
-
-    me = User(id=1, is_self=True, bot=False, first_name="Owner")
-    spammer = User(id=2, is_self=False, bot=False, first_name="Spam")
-    group = Channel(
-        id=99,
-        title="Test Group",
-        photo=None,
-        date=datetime.now(timezone.utc),
-        broadcast=False,
-        megagroup=True,
-    )
-    message = SimpleNamespace(
-        sender_id=spammer.id,
-        date=datetime.now(timezone.utc),
-        text="投資穩賺，立即加入",
-        photo=None,
-    )
-
-    class FakeClient:
-        kick_requests = 0
-
-        def __init__(self, *args):
-            pass
-
-        async def connect(self):
-            pass
-
-        async def disconnect(self):
-            pass
-
-        async def is_user_authorized(self):
-            return True
-
-        async def get_me(self):
-            return me
-
-        async def get_dialogs(self, limit):
-            assert limit == 50
-            return [SimpleNamespace(entity=group)]
-
-        async def get_permissions(self, entity, user_id):
-            assert entity is group
-            assert user_id == me.id
-            return SimpleNamespace(is_admin=True)
-
-        async def get_messages(self, entity, limit):
-            assert entity is group
-            assert limit == 20
-            return [message]
-
-        async def get_entity(self, user_id):
-            assert user_id == spammer.id
-            return spammer
-
-        async def __call__(self, request):
-            if type(request).__name__ == "EditBannedRequest":
-                type(self).kick_requests += 1
-            return SimpleNamespace(users=[])
-
-    with patch.object(telethon, "TelegramClient", FakeClient):
-        result = asyncio.run(teleshield.scan_history("group", dry_run=True))
-
-    assert result["groups_found"] == 1
-    assert result["matched"] == 1
-    assert result["acted"] == 0
-    assert FakeClient.kick_requests == 0
-    assert teleshield.load_config()["kicked_count"] == 0
-
-
 def test_scan_history_honours_cancellation_before_history_fetch(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     teleshield.save_config({"api_id": 1234, "api_hash": "[REDACTED]"})
@@ -721,6 +641,14 @@ def test_build_report_returns_structured_summary_and_trend(monkeypatch, tmp_path
 
 def test_list_entries_filter_and_update_scan_settings(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_config({
+        "scan_settings": {
+            "group_dialog_limit": 12,
+            "group_message_limit": 40,
+            "group_days": 2,
+        },
+        "managed_groups": [{"id": "-100", "title": "Legacy group", "enabled": True}],
+    })
     teleshield.upsert_list_entry("whitelist", "123", "trusted_user", "manual")
     teleshield.upsert_list_entry("blacklist", "456", "bad_user", "spam")
 
@@ -734,19 +662,24 @@ def test_list_entries_filter_and_update_scan_settings(monkeypatch, tmp_path):
         "private_dialog_limit": 9999,
         "private_message_limit": 0,
         "private_days": 30,
-        "group_dialog_limit": 12,
-        "group_message_limit": 40,
-        "group_days": 2,
     })
     assert settings == {
         "private_dialog_limit": 100,
         "private_message_limit": 1,
         "private_days": 30,
+    }
+    assert teleshield.get_scan_settings()["private_dialog_limit"] == 100
+    assert teleshield.load_config()["scan_settings"] == {
         "group_dialog_limit": 12,
         "group_message_limit": 40,
         "group_days": 2,
+        "private_dialog_limit": 100,
+        "private_message_limit": 1,
+        "private_days": 30,
     }
-    assert teleshield.get_scan_settings()["private_dialog_limit"] == 100
+    assert teleshield.load_config()["managed_groups"] == [
+        {"id": "-100", "title": "Legacy group", "enabled": True}
+    ]
 
 
 def test_list_entries_can_export_and_import_json_and_csv(monkeypatch, tmp_path):
@@ -761,22 +694,6 @@ def test_list_entries_can_export_and_import_json_and_csv(monkeypatch, tmp_path):
     teleshield.clear_local_session()
     assert teleshield.import_list_entries(str(json_path), "whitelist", replace=True) == 1
     assert teleshield.list_entries("whitelist")[0]["username"] == "trusted_user"
-
-
-def test_managed_groups_merge_and_toggle(monkeypatch, tmp_path):
-    configure_temp_storage(monkeypatch, tmp_path)
-    teleshield.save_config({"managed_groups": [{"id": "1", "title": "Existing", "enabled": False}]})
-
-    groups = teleshield.merge_managed_groups([
-        {"id": "1", "title": "Renamed", "username": "existing"},
-        {"id": "2", "title": "New Group", "username": "new_group"},
-    ])
-
-    assert groups[0]["enabled"] is False
-    assert groups[0]["title"] == "Renamed"
-    assert groups[1]["enabled"] is True
-    teleshield.set_managed_group_enabled("2", False)
-    assert teleshield.is_group_enabled("2", teleshield.load_config()) is False
 
 
 def test_clear_local_session_removes_auth_identity_without_logging_secrets(monkeypatch, tmp_path):
@@ -814,67 +731,6 @@ def test_ocr_status_uses_configured_executable_without_logging_path(monkeypatch,
     assert status["available"] is True
     assert status["bundled"] is False
     assert status["languages"] == ["chi_sim", "chi_tra", "eng"]
-
-
-def test_discover_managed_groups_returns_only_admin_groups(monkeypatch, tmp_path):
-    configure_temp_storage(monkeypatch, tmp_path)
-    teleshield.save_config({"api_id": 1234, "api_hash": "[REDACTED]"})
-    me = User(id=1, is_self=True, bot=False, first_name="Owner")
-    admin_group = Channel(
-        id=99,
-        title="Admin Group",
-        photo=None,
-        date=datetime.now(timezone.utc),
-        broadcast=False,
-        megagroup=True,
-    )
-    ordinary_group = Channel(
-        id=100,
-        title="Other Group",
-        photo=None,
-        date=datetime.now(timezone.utc),
-        broadcast=False,
-        megagroup=True,
-    )
-
-    class FakeClient:
-        def __init__(self, *args):
-            self.logged_out = False
-
-        async def connect(self):
-            pass
-
-        async def disconnect(self):
-            pass
-
-        async def is_user_authorized(self):
-            return True
-
-        async def get_me(self):
-            return me
-
-        async def get_dialogs(self, limit):
-            assert limit == 100
-            return [
-                SimpleNamespace(entity=admin_group),
-                SimpleNamespace(entity=ordinary_group),
-            ]
-
-        async def get_permissions(self, entity, user_id):
-            return SimpleNamespace(is_admin=entity is admin_group, is_creator=False)
-
-    with patch.object(telethon, "TelegramClient", FakeClient):
-        groups = asyncio.run(teleshield.discover_managed_groups())
-
-    assert groups == [{
-        "id": "99",
-        "title": "Admin Group",
-        "username": "",
-        "is_creator": False,
-        "is_admin": True,
-        "enabled": True,
-    }]
-    assert teleshield.load_config()["managed_groups"][0]["enabled"] is True
 
 
 def test_logout_account_calls_telegram_and_clears_local_identity(monkeypatch, tmp_path):
@@ -1581,7 +1437,7 @@ def test_connect_failure_still_hardens_new_session_file(monkeypatch, tmp_path):
 
     with patch.object(telethon, "TelegramClient", FakeClient):
         with pytest.raises(OSError, match="connect failed"):
-            asyncio.run(teleshield.discover_managed_groups("account-a"))
+            asyncio.run(teleshield.scan_history("private", dry_run=True, account_id="account-a"))
 
     assert store.session_file.stat().st_mode & 0o777 == 0o600
 

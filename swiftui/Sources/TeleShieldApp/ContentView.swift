@@ -125,9 +125,12 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(client.helperIsRunning ? .green : .secondary)
                 if let account = client.selectedAccount {
-                    Text(account.running ? "\(account.label) 正在防護" : "\(account.label) 已停止")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Text(account.label)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        AccountStatusBadge(account: account)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -165,8 +168,13 @@ private struct PageHeader<Content: View>: View {
     var body: some View {
         HStack(alignment: .top, spacing: 18) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(title).font(.largeTitle.bold())
-                Text(subtitle).foregroundStyle(.secondary)
+                Text(title)
+                    .font(.system(size: 30, weight: .bold))
+                    .tracking(-0.3)
+                Text(subtitle)
+                    .font(.callout)
+                    .foregroundStyle(TeleShieldDesign.muted)
+                    .lineLimit(2)
             }
             Spacer()
             content()
@@ -188,13 +196,14 @@ private struct OverviewView: View {
                     .disabled(client.isBusy)
                 }
                 if let account = client.selectedAccount, account.configured {
-                    ProtectionSummary(account: account)
+                    ProtectionSummary(client: client, account: account)
                     EventLogCard(client: client)
                 } else {
                     OnboardingCard(client: client, showLogin: $showLogin)
                 }
             }
-            .padding(28)
+            .teleShieldPageContent()
+            .padding(TeleShieldDesign.pagePadding)
         }
         .task(id: client.selectedAccountID) {
             await client.fetchBlockRecords(query: "", source: "all")
@@ -227,26 +236,40 @@ private struct HistoryScanViewPage: View {
                     OnboardingCard(client: client, showLogin: $showLogin)
                 }
             }
-            .padding(28)
+            .teleShieldPageContent()
+            .padding(TeleShieldDesign.pagePadding)
         }
     }
 }
 
 private struct ProtectionSummary: View {
+    @ObservedObject var client: CoreClient
     let account: AccountSummary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack {
+            HStack(alignment: .top, spacing: 18) {
                 VStack(alignment: .leading, spacing: 4) {
                     Label(account.ready ? "防護執行中" : (account.running ? "正在啟動" : "防護已停止"), systemImage: account.ready ? "checkmark.shield.fill" : "shield")
                         .font(.title2.bold())
                         .foregroundStyle(account.ready ? .green : (account.running ? .orange : .secondary))
                     Text(account.displayName.isEmpty ? "@\(account.username)" : account.displayName)
-                        .foregroundStyle(.secondary)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
                     if let userID = account.userID { Text("Telegram ID：\(userID)").font(.caption).foregroundStyle(.tertiary) }
                 }
                 Spacer()
+                Button {
+                    Task { await client.setProtection(accountID: account.id, enabled: !account.running) }
+                } label: {
+                    Label(
+                        account.running ? "停止防護" : "啟動防護",
+                        systemImage: account.running ? "pause.fill" : "play.fill"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(client.isBusy)
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
                 MetricCard(title: "24 小時封鎖", value: "\(account.recentBlockCount)", icon: "calendar")
@@ -256,8 +279,8 @@ private struct ProtectionSummary: View {
                 MetricCard(title: "學習關鍵詞", value: "\(account.learnedKeywordCount)", icon: "text.magnifyingglass")
             }
         }
-        .padding(20)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding(22)
+        .teleShieldSurface()
     }
 }
 
@@ -283,7 +306,7 @@ private struct OnboardingCard: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .teleShieldSurface()
     }
 }
 
@@ -339,7 +362,7 @@ private struct EventLogCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .teleShieldSurface(radius: 14)
     }
 }
 
@@ -359,6 +382,22 @@ private struct HistoryScanView: View {
                     Button("停止掃描") { Task { await client.cancelScan() } }
                         .buttonStyle(.bordered)
                 }
+            }
+            if client.hasActiveScan {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("正在掃描 Telegram")
+                            .font(.callout.weight(.semibold))
+                        Text("掃描進度會持續顯示在下方，完成後可檢視匹配結果。")
+                            .font(.caption)
+                            .foregroundStyle(TeleShieldDesign.muted)
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color.accentColor.opacity(0.08))
             }
             HStack {
                 Text("私訊（\(client.scanSettings.privateDialogLimit) 對話／\(client.scanSettings.privateMessageLimit) 訊息）")
@@ -390,7 +429,7 @@ private struct HistoryScanView: View {
                 }
                 .frame(height: 150)
                 .padding(10)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color(nsColor: .textBackgroundColor))
             }
             if let result = client.scanResult, !result.findings.isEmpty {
                 HStack {
@@ -410,7 +449,7 @@ private struct HistoryScanView: View {
             }
         }
         .padding(18)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .teleShieldSurface(radius: 14)
         .confirmationDialog("即將對 Telegram 執行私訊封鎖", isPresented: $showApplyConfirmation, titleVisibility: .visible) {
             Button("確認開始處理", role: .destructive) { Task { await client.startScan(dryRun: false) } }
             Button("取消", role: .cancel) {}
@@ -453,6 +492,8 @@ private struct ListManagementView: View {
                 TextField("搜尋 ID、Username 或原因", text: $query)
                 Button("重新整理") { Task { await client.fetchList(listType, query: query) } }
             }
+            .padding(12)
+            .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color(nsColor: .textBackgroundColor))
             HStack {
                 TextField("Telegram User ID", text: $userID).frame(width: 170)
                 TextField("Username", text: $username).frame(width: 170)
@@ -474,19 +515,30 @@ private struct ListManagementView: View {
                     Button("CSV") { exportList("csv") }
                 }
             }
-            List(rows, selection: $selectedIDs) { row in
-                HStack {
-                    Text(row.userID).font(.body.monospaced())
-                    Text(row.username.isEmpty ? "—" : "@\(row.username)").foregroundStyle(.secondary)
-                    Spacer()
-                    Text(row.reason).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Text(row.added).font(.caption2).foregroundStyle(.tertiary)
+            .padding(12)
+            .teleShieldSurface(radius: TeleShieldDesign.innerRadius)
+            if rows.isEmpty {
+                TeleShieldEmptyState(
+                    icon: listType == "whitelist" ? "checkmark.shield" : "nosign",
+                    title: listType == "whitelist" ? "尚無白名單項目" : "尚無黑名單項目",
+                    message: "新增 Telegram User ID 或 Username 後，這裡會顯示可管理的例外項目。"
+                )
+            } else {
+                List(rows, selection: $selectedIDs) { row in
+                    HStack {
+                        Text(row.userID).font(.body.monospaced())
+                        Text(row.username.isEmpty ? "—" : "@\(row.username)").foregroundStyle(.secondary)
+                        Spacer()
+                        Text(row.reason).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                        Text(row.added).font(.caption).foregroundStyle(TeleShieldDesign.muted)
+                    }
+                    .tag(row.id)
                 }
-                .tag(row.id)
+                .listStyle(.inset)
             }
-            .listStyle(.inset)
         }
-        .padding(28)
+        .teleShieldPageContent()
+        .padding(TeleShieldDesign.pagePadding)
         .task(id: listType) { await client.fetchList(listType, query: query) }
         .confirmationDialog("移除選取的名單項目？", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
             Button("確認移除", role: .destructive) {
@@ -529,7 +581,7 @@ private struct RulesView: View {
                     .font(.body)
                     .frame(minHeight: 130)
                     .padding(6)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color(nsColor: .textBackgroundColor))
                 VStack(alignment: .leading, spacing: 10) {
                     Text("貼上一則廣告或可疑訊息").font(.headline)
                     Text("系統會拆出關鍵詞與可重用模式；不會把完整訊息送到網路。")
@@ -548,19 +600,28 @@ private struct RulesView: View {
                 }
                 .disabled(selected == nil)
             }
-            List(rules, id: \.value, selection: Binding(get: { selected?.value }, set: { value in selected = rules.first { $0.value == value } })) { rule in
-                HStack {
-                    Text(rule.kind == "keywords" ? "關鍵詞" : "模式")
-                        .font(.caption.bold())
-                        .foregroundStyle(rule.kind == "keywords" ? .blue : .orange)
-                        .frame(width: 65, alignment: .leading)
-                    Text(rule.value).font(.body.monospaced())
+            if rules.isEmpty {
+                TeleShieldEmptyState(
+                    icon: "text.magnifyingglass",
+                    title: "尚未建立學習規則",
+                    message: "貼上一則廣告或可疑訊息，讓 TeleShield 建立可重複使用的關鍵詞與模式。"
+                )
+            } else {
+                List(rules, id: \.value, selection: Binding(get: { selected?.value }, set: { value in selected = rules.first { $0.value == value } })) { rule in
+                    HStack {
+                        Text(rule.kind == "keywords" ? "關鍵詞" : "模式")
+                            .font(.caption.bold())
+                            .foregroundStyle(rule.kind == "keywords" ? .blue : .orange)
+                            .frame(width: 65, alignment: .leading)
+                        Text(rule.value).font(.body.monospaced())
+                    }
+                    .tag(rule.value)
                 }
-                .tag(rule.value)
+                .listStyle(.inset)
             }
-            .listStyle(.inset)
         }
-        .padding(28)
+        .teleShieldPageContent()
+        .padding(TeleShieldDesign.pagePadding)
         .task { await client.refreshAccountData() }
     }
 }
@@ -601,7 +662,8 @@ private struct ReportView: View {
                     EmptyPanel(title: "尚未產生報告", message: "選擇期間後按「重新產生」。")
                 }
             }
-            .padding(28)
+            .teleShieldPageContent()
+            .padding(TeleShieldDesign.pagePadding)
         }
         .task(id: client.selectedAccountID) { await client.buildReport(period: period) }
     }
@@ -620,13 +682,30 @@ private struct ReportDictionaryCard: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title).font(.headline)
             if values.isEmpty { Text("無資料").foregroundStyle(.secondary) }
-            ForEach(values.keys.sorted(), id: \.self) { key in
-                HStack { Text(key); Spacer(); Text("\(values[key] ?? 0)").fontWeight(.semibold).monospacedDigit() }
+            let maxValue = max(values.values.max() ?? 1, 1)
+            ForEach(values.keys.sorted(by: { (values[$0] ?? 0) > (values[$1] ?? 0) }), id: \.self) { key in
+                let count = values[key] ?? 0
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 8) {
+                        Text(key)
+                            .lineLimit(2)
+                        Spacer(minLength: 8)
+                        Text("\(count)")
+                            .fontWeight(.semibold)
+                            .monospacedDigit()
+                    }
+                    GeometryReader { proxy in
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.8))
+                            .frame(width: max(6, proxy.size.width * CGFloat(count) / CGFloat(maxValue)), height: 6)
+                    }
+                    .frame(height: 6)
+                }
             }
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .teleShieldSurface(radius: 14)
     }
 }
 
@@ -640,16 +719,19 @@ private struct TrendCard: View {
             ForEach(values.keys.sorted(), id: \.self) { key in
                 HStack(spacing: 10) {
                     Text(key).font(.caption.monospaced()).frame(width: 90, alignment: .leading)
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(.blue.gradient)
-                        .frame(width: max(4, CGFloat(values[key] ?? 0) / CGFloat(maxValue) * 300), height: 14)
+                    GeometryReader { proxy in
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(.blue.gradient)
+                            .frame(width: max(4, proxy.size.width * CGFloat(values[key] ?? 0) / CGFloat(maxValue)), height: 14)
+                    }
+                    .frame(height: 14)
                     Text("\(values[key] ?? 0)").font(.caption.monospacedDigit())
                 }
             }
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .teleShieldSurface(radius: 14)
     }
 }
 
@@ -675,18 +757,37 @@ private struct BlockRecordsView: View {
                 .frame(width: 120)
                 Button("重新整理") { Task { await client.fetchBlockRecords(query: query, source: source) } }
             }
-            List(client.blockRecords) { record in
-                HStack(alignment: .top, spacing: 12) {
-                    Text(record.displayTime).font(.caption.monospaced()).frame(width: 175, alignment: .leading)
-                    Text(record.source == "group" ? "群組" : "私訊").font(.caption.bold()).foregroundStyle(record.source == "group" ? .orange : .blue).frame(width: 45, alignment: .leading)
-                    Text(record.userID).font(.caption.monospaced()).frame(width: 100, alignment: .leading)
-                    Text(record.name).fontWeight(.medium).frame(width: 150, alignment: .leading)
-                    Text(record.reason).foregroundStyle(.secondary).lineLimit(2)
+            if client.blockRecords.isEmpty {
+                TeleShieldEmptyState(
+                    icon: "checkmark.circle",
+                    title: "尚無封鎖記錄",
+                    message: "目前的帳號尚未產生封鎖事件，或沒有符合目前搜尋與來源篩選的資料。"
+                )
+            } else {
+                HStack(alignment: .center, spacing: 12) {
+                    Text("時間").frame(width: 175, alignment: .leading)
+                    Text("來源").frame(width: 45, alignment: .leading)
+                    Text("User ID").frame(width: 100, alignment: .leading)
+                    Text("名稱").frame(width: 150, alignment: .leading)
+                    Text("原因")
                 }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(TeleShieldDesign.muted)
+                .padding(.horizontal, 12)
+                List(client.blockRecords) { record in
+                    HStack(alignment: .top, spacing: 12) {
+                        Text(record.displayTime).font(.caption.monospaced()).frame(width: 175, alignment: .leading)
+                        Text(record.source == "group" ? "群組" : "私訊").font(.caption.bold()).foregroundStyle(record.source == "group" ? .orange : .blue).frame(width: 45, alignment: .leading)
+                        Text(record.userID).font(.caption.monospaced()).frame(width: 100, alignment: .leading)
+                        Text(record.name).font(.callout.weight(.medium)).frame(width: 150, alignment: .leading)
+                        Text(record.reason).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+                .listStyle(.inset)
             }
-            .listStyle(.inset)
         }
-        .padding(28)
+        .teleShieldPageContent()
+        .padding(TeleShieldDesign.pagePadding)
         .task(id: client.selectedAccountID) { await client.fetchBlockRecords(query: query, source: source) }
     }
 
@@ -952,7 +1053,7 @@ private struct AccountDetailsSettingsView: View {
                     .buttonStyle(.borderedProminent)
                 }
 
-                Section("Telegram Session") {
+                Section {
                     HStack {
                         Text("Session 狀態")
                         Spacer()
@@ -971,9 +1072,11 @@ private struct AccountDetailsSettingsView: View {
                         .disabled(sessionActionsDisabled)
                     Button("刪除 Session 與 API 設定", role: .destructive) { showClearCredentialsConfirmation = true }
                         .disabled(sessionActionsDisabled)
+                } header: {
+                    Label("Telegram Session", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(TeleShieldDesign.danger)
+                } footer: {
                     Text("這些操作只作用於此帳號；即時防護或歷史掃描執行中時會被鎖定。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -1101,7 +1204,7 @@ private struct AccountsView: View {
             }
             .listStyle(.inset)
         }
-        .padding(28)
+        .padding(TeleShieldDesign.pagePadding)
         .confirmationDialog("移除帳號？", isPresented: Binding(get: { removalAccountID != nil }, set: { if !$0 { removalAccountID = nil } }), titleVisibility: .visible) {
             Button("確認移除全部本機資料", role: .destructive) {
                 if let accountID = removalAccountID {
@@ -1152,8 +1255,22 @@ private struct LoginSheet: View {
                 Button("關閉") { dismiss() }
             }
             Divider()
-            Text("API 憑證只會交給本機 sidecar；請勿把 Hash 或 2FA 密碼貼到聊天或記錄中。")
-                .font(.callout).foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.title3)
+                    .foregroundStyle(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("憑證只在本機處理")
+                        .font(.callout.weight(.semibold))
+                    Text("API 憑證只會交給本機 sidecar；請勿把 Hash 或 2FA 密碼貼到聊天或記錄中。")
+                        .font(.caption)
+                        .foregroundStyle(TeleShieldDesign.muted)
+                }
+            }
+            .padding(12)
+            .teleShieldSurface(radius: TeleShieldDesign.innerRadius, fill: Color.blue.opacity(0.08))
+            Text(authStepTitle)
+                .font(.headline)
             if client.authChallengeKind == nil {
                 TextField("API ID（正整數）", text: $apiID)
                 SecureField("API Hash", text: $apiHash)
@@ -1212,7 +1329,7 @@ private struct LoginSheet: View {
             }
             if let error = client.errorMessage { Text(error).foregroundStyle(.red).font(.callout) }
         }
-        .padding(28)
+        .padding(TeleShieldDesign.pagePadding)
         .frame(width: 520)
         .onChange(of: client.authInProgress) { inProgress in
             if !inProgress {
@@ -1239,6 +1356,14 @@ private struct LoginSheet: View {
             if await client.removeAccount(accountID, deleteFiles: true) {
                 temporaryAccountID = nil
             }
+        }
+    }
+
+    private var authStepTitle: String {
+        switch client.authChallengeKind {
+        case "code": return "步驟 2：輸入 Telegram 驗證碼"
+        case "password": return "步驟 3：輸入 Telegram 兩步驟驗證密碼"
+        default: return "步驟 1：輸入 Telegram API 與手機號碼"
         }
     }
 }
@@ -1346,13 +1471,18 @@ private struct AccountStatusBadge: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Circle()
-                .fill(account.statusColor)
-                .frame(width: 6, height: 6)
+            Image(systemName: account.statusIcon)
             Text(account.statusLabel)
         }
-        .font(.caption2.weight(.medium))
+        .font(.caption.weight(.semibold))
         .foregroundStyle(account.statusColor)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(account.statusColor.opacity(0.12), in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(account.statusColor.opacity(0.2), lineWidth: 1)
+        }
     }
 }
 
@@ -1378,6 +1508,14 @@ private extension AccountSummary {
         if running { return .orange }
         return .secondary
     }
+
+    var statusIcon: String {
+        if !configured { return "person.crop.circle" }
+        if let error, !error.isEmpty { return "exclamationmark.triangle.fill" }
+        if ready { return "checkmark.shield.fill" }
+        if running { return "arrow.triangle.2.circlepath" }
+        return "pause.circle.fill"
+    }
 }
 
 private struct MetricCard: View {
@@ -1387,12 +1525,16 @@ private struct MetricCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Label(title, systemImage: icon).font(.callout).foregroundStyle(.secondary)
-            Text(value).font(.title2.bold().monospacedDigit())
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(TeleShieldDesign.muted)
+            Text(value)
+                .font(.system(size: 26, weight: .bold).monospacedDigit())
+                .foregroundStyle(.primary)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .teleShieldSurface(radius: TeleShieldDesign.innerRadius)
     }
 }
 
@@ -1402,12 +1544,13 @@ private struct EmptyPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.title3.bold())
+            Label(title, systemImage: "doc.text.magnifyingglass")
+                .font(.title3.bold())
             Text(message).foregroundStyle(.secondary)
         }
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .teleShieldSurface(radius: 14)
     }
 }
 

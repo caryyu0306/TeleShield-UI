@@ -19,21 +19,23 @@ test -f "$ICON_FILE"
   --clean \
   --console \
   --name TeleShieldCore \
-  --additional-hooks-dir "${ROOT_DIR}/scripts/pyinstaller-hooks" \
   --collect-data opencc \
-  --add-data "build/tesseract-runtime:tesseract-runtime" \
   core_service.py
 
 "$PYTHON_BIN" "${ROOT_DIR}/scripts/dedupe_macos_dylibs.py" "$SIDECAR_DIR"
-"$PYTHON_BIN" "${ROOT_DIR}/scripts/verify_pillow_codecs.py" "$SIDECAR_DIR"
 
 swift build --package-path swiftui -c release
+SWIFT_BIN_DIR="$(swift build --package-path swiftui -c release --show-bin-path)"
+
+test -x "$SWIFT_BIN_DIR/VisionOCR"
+cp "$SWIFT_BIN_DIR/VisionOCR" "$SIDECAR_DIR/VisionOCR"
+chmod 755 "$SIDECAR_DIR/VisionOCR"
 
 mkdir -p \
   "$APP_DIR/Contents/MacOS" \
   "$APP_DIR/Contents/Helpers" \
   "$APP_DIR/Contents/Resources"
-cp "swiftui/.build/release/TeleShieldApp" "$APP_DIR/Contents/MacOS/TeleShieldApp"
+cp "$SWIFT_BIN_DIR/TeleShieldApp" "$APP_DIR/Contents/MacOS/TeleShieldApp"
 cp -R "$SIDECAR_DIR" "$APP_DIR/Contents/Helpers/TeleShieldCore"
 cp "swiftui/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$ICON_FILE" "$APP_DIR/Contents/Resources/TeleShield.icns"
@@ -42,6 +44,7 @@ chmod 755 "$APP_DIR/Contents/Helpers/TeleShieldCore/TeleShieldCore"
 
 test -x "$APP_DIR/Contents/MacOS/TeleShieldApp"
 test -x "$APP_DIR/Contents/Helpers/TeleShieldCore/TeleShieldCore"
+test -x "$APP_DIR/Contents/Helpers/TeleShieldCore/VisionOCR"
 
 echo "Built $APP_DIR"
 du -sh "$APP_DIR"

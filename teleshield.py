@@ -7,7 +7,7 @@ and reporting implementation in one place, but it no longer exposes a
 command-line entry point.
 """
 
-import asyncio, csv, errno, json, os, random, re, shutil, ssl, sys, tempfile, threading, time
+import asyncio, csv, errno, json, os, random, re, shutil, ssl, subprocess, sys, tempfile, threading, time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -916,6 +916,10 @@ SPAM_PATTERNS = [
     r"投資|理財|帶單|跟單|量化|穩賺|穩健|高回報|高收益",
     r"色情|A片|av|成人|裸聊|約炮|援交|包養",
     r"賭|博|彩|casino|betting",
+    # 網路博弈廣告常見用語：娛樂城、玩法、下注及優惠話術。
+    r"線上博弈|網路博弈|線上賭博|網路賭博|娛樂城|歡樂城|賭場|赌场",
+    r"推筒子|百家樂|百家乐|骰寶|骰宝|老虎機|老虎机|角子機|拉霸|球版|現金版",
+    r"真人荷官|真人娛樂|下注|投注|賭金|彩金|返水|洗碼|賠率|高賠率|保證贏|保證獲利",
     r"註冊送|免費領|紅包|禮金|優惠碼|推廣碼",
     r"點贊|關注|刷粉|刷讚|漲粉",
     r"售|賣|出|供應|批發|代購|代發",
@@ -1625,33 +1629,56 @@ def clear_local_session(remove_credentials: bool = False, account_id: Optional[s
                 _write_account_registry(registry, root_path)
 
 
-def find_tesseract() -> Optional[str]:
-    """Find a system or bundled Tesseract executable without exposing secrets."""
+def find_vision_ocr() -> Optional[str]:
+    """Find the bundled native Vision OCR helper without requiring Tesseract."""
     candidates = []
-    configured = os.getenv("TELESHIELD_TESSERACT_PATH")
+    configured = os.getenv("TELESHIELD_VISION_OCR_PATH")
     if configured:
         candidates.append(Path(configured).expanduser())
+
+    executable = Path(sys.executable).expanduser()
+    if executable:
+        executable = executable.resolve()
+        candidates.append(executable.parent / "VisionOCR")
+        candidates.append(executable.parent.parent / "VisionOCR")
+
     bundle_root = getattr(sys, "_MEIPASS", None)
     if bundle_root:
         bundle = Path(bundle_root)
         candidates.extend([
-            bundle / "tesseract-runtime" / "bin" / "tesseract",
-            bundle / "tesseract-runtime" / "tesseract",
-            bundle / "tesseract",
+            bundle / "VisionOCR",
+            bundle.parent / "VisionOCR",
         ])
-    system_path = shutil.which("tesseract")
-    if system_path:
-        candidates.append(Path(system_path))
+
+    candidates.append(Path(__file__).resolve().parent / "VisionOCR")
+    seen = set()
     for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return None
 
 
+def _vision_ocr_is_bundled(path: Optional[str]) -> bool:
+    if not path:
+        return False
+    try:
+        executable_parent = Path(sys.executable).expanduser().resolve().parent
+        return Path(path).resolve().parent == executable_parent
+    except OSError:
+        return False
+
+
 def get_ocr_status() -> dict:
-    path = find_tesseract()
-    bundled = bool(path and getattr(sys, "_MEIPASS", None) and str(path).startswith(str(sys._MEIPASS)))
-    return {"available": bool(path), "bundled": bundled, "languages": ["chi_sim", "chi_tra", "eng"] if path else []}
+    path = find_vision_ocr()
+    return {
+        "available": bool(path),
+        "bundled": _vision_ocr_is_bundled(path),
+        "languages": ["zh-Hant", "zh-Hans", "en"] if path else [],
+    }
 
 def is_spam(text: str, cfg: dict = None, account_id: Optional[str] = None) -> bool:
     """檢查文字是否包含廣告模式（含自訂模式）"""
@@ -1771,23 +1798,27 @@ async def block_private_user(
     return deletion
 
 def ocr_image(image_path: str) -> str:
-    """Extract Chinese/English text when a system or bundled Tesseract exists."""
+    """Extract Chinese/English text through the native macOS Vision helper."""
     try:
-        from PIL import Image
-        import pytesseract
-
-        tesseract_path = find_tesseract()
-        if not tesseract_path:
+        vision_ocr_path = find_vision_ocr()
+        if not vision_ocr_path:
             return ""
-        pytesseract.pytesseract.tesseract_cmd = tesseract_path
-        config = ""
-        bundle_root = getattr(sys, "_MEIPASS", None)
-        if bundle_root:
-            tessdata = Path(bundle_root) / "tesseract-runtime" / "share" / "tessdata"
-            if tessdata.is_dir():
-                config = f'--tessdata-dir "{tessdata}"'
-        img = Image.open(image_path)
-        text = pytesseract.image_to_string(img, lang="chi_sim+chi_tra+eng", config=config)
+
+        result = subprocess.run(
+            [vision_ocr_path, "--image", str(image_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        payload = json.loads(result.stdout)
+        text = payload.get("text", "") if isinstance(payload, dict) else ""
+        if not isinstance(text, str):
+            return ""
         return normalize_traditional(text.strip())
     except Exception:
         return ""

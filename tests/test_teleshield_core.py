@@ -689,9 +689,16 @@ def test_simplified_text_is_normalized_for_rules_and_learning(monkeypatch, tmp_p
     assert "投資穩賺" in learned
 
 
-def test_gambling_ocr_terms_match_spam_rules():
-    recognized = "少年董雹樂城\n簡單刺激\n又好玩\n推筒子\nBAR\n嵩倍體驗"
-
+@pytest.mark.parametrize(
+    "recognized",
+    [
+        "少年董雹樂城\n簡單刺激\n又好玩\n推筒子\nBAR\n嵩倍體驗",
+        "線上娛樂城 真人百家樂 返水優惠",
+        "球版 現金版 高賠率，立即下注",
+        "老虎機 保證獲利，彩金快速入帳",
+    ],
+)
+def test_gambling_ocr_terms_match_spam_rules(recognized):
     assert teleshield.is_spam(recognized) is True
 
 

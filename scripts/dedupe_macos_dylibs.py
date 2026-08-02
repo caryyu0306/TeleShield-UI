@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Replace byte-identical bundled dylibs with relative symlinks.
+"""Replace byte-identical PyInstaller dylibs with relative symlinks.
 
-PyInstaller and the manually bundled Tesseract runtime can place the same
-dependency at both the helper root and tesseract-runtime/lib. Only exact byte
-matches are deduplicated; differently-rewritten Mach-O files are left alone
-because their loader paths may intentionally differ.
+Only exact byte matches are deduplicated; differently-rewritten Mach-O files
+are left alone because their loader paths may intentionally differ.
 """
 
 from __future__ import annotations
@@ -24,10 +22,9 @@ def digest(path: Path) -> str:
 
 
 def canonical_key(path: Path) -> tuple[int, str]:
-    # Keep the explicitly bundled Tesseract copy as the physical file. The
-    # helper-root path remains available through a relative symlink.
-    is_tesseract_runtime = "tesseract-runtime" in path.parts and "lib" in path.parts
-    return (0 if is_tesseract_runtime else 1, str(path))
+    # Keep the shallowest path as the physical file so nested copies become
+    # relative symlinks without depending on a specific native dependency.
+    return (len(path.parts), str(path))
 
 
 def main() -> int:

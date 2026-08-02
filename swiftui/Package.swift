@@ -17,6 +17,10 @@ let package = Package(
             name: "TeleShieldApp",
             path: "Sources/TeleShieldApp"
         ),
+        .executableTarget(
+            name: "VisionOCR",
+            path: "Sources/VisionOCR"
+        ),
         .testTarget(
             name: "TeleShieldAppTests",
             dependencies: ["TeleShieldApp"],

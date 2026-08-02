@@ -66,12 +66,8 @@ jobs:
           actual_arch="$(uname -m)"
           echo "Runner architecture: $actual_arch"
           test "$actual_arch" = "$EXPECTED_ARCH"
-      - name: Install Tesseract runtime dependencies
-        run: brew install tesseract tesseract-lang dylibbundler zlib jpeg-turbo
       - name: Install sidecar dependencies
         run: scripts/install_sidecar_dependencies.sh
-      - name: Bundle Chinese/English Tesseract runtime
-        run: scripts/bundle_tesseract_macos.sh build/tesseract-runtime
       - name: Build SwiftUI application bundle
         run: scripts/build_swiftui_macos.sh
       - name: Verify helper architecture and self-test
@@ -81,13 +77,27 @@ jobs:
         run: |
           APP="dist/TeleShieldSwiftUI.app"
           CORE="$APP/Contents/Helpers/TeleShieldCore/TeleShieldCore"
+          OCR="$APP/Contents/Helpers/TeleShieldCore/VisionOCR"
           app_arch="$(lipo -archs "$APP/Contents/MacOS/TeleShieldApp")"
           helper_arch="$(lipo -archs "$CORE")"
+          ocr_arch="$(lipo -archs "$OCR")"
           echo "SwiftUI app architecture: $app_arch"
           echo "Sidecar architecture: $helper_arch"
+          echo "Vision OCR architecture: $ocr_arch"
           test "$app_arch" = "$EXPECTED_ARCH"
           test "$helper_arch" = "$EXPECTED_ARCH"
+          test "$ocr_arch" = "$EXPECTED_ARCH"
           "$CORE" --self-test
+          "$OCR" --self-test > "${RUNNER_TEMP}/vision-ocr-self-test.json"
+          OCR_FIXTURE="${RUNNER_TEMP}/teleshield-ocr-fixture.png"
+          swift scripts/generate_vision_ocr_fixture.swift "$OCR_FIXTURE"
+          OCR_IMAGE="$OCR_FIXTURE" TELESHIELD_VISION_OCR_PATH="$OCR" python - <<'PY'
+          import os
+          import teleshield
+
+          text = teleshield.ocr_image(os.environ["OCR_IMAGE"])
+          assert teleshield.is_spam(text), repr(text)
+          PY
           printf '%s\n' \
             '{"id":1,"method":"get_status"}' \
             '{"id":2,"method":"get_ocr_status"}' \
@@ -104,19 +114,6 @@ jobs:
           assert isinstance(rows[0]["result"]["accounts"], list)
           assert "available" in rows[1]["result"]
           PY
-      - name: Verify bundled OCR runtime inside helper
-        run: |
-          ROOT="dist/TeleShieldSwiftUI.app/Contents/Helpers/TeleShieldCore"
-          TESSERACT_BIN="$(find "$ROOT" -type f -path '*/tesseract-runtime/bin/tesseract' -print -quit)"
-          CHI_SIM_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/chi_sim.traineddata' -print -quit)"
-          CHI_TRA_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/chi_tra.traineddata' -print -quit)"
-          ENG_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/eng.traineddata' -print -quit)"
-          test -n "$TESSERACT_BIN"
-          test -n "$CHI_SIM_DATA"
-          test -n "$CHI_TRA_DATA"
-          test -n "$ENG_DATA"
-          chmod 755 "$TESSERACT_BIN"
-          TESSDATA_PREFIX="$(dirname "$CHI_SIM_DATA")" "$TESSERACT_BIN" --list-langs
       - name: Validate app metadata and report size
         run: |
           plutil -lint dist/TeleShieldSwiftUI.app/Contents/Info.plist

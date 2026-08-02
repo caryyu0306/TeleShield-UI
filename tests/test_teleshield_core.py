@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import multiprocessing
 from pathlib import Path
+import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -858,17 +859,32 @@ def test_clear_local_session_removes_auth_identity_without_logging_secrets(monke
     assert cfg["blocked_count"] == 3
 
 
-def test_ocr_status_uses_configured_executable_without_logging_path(monkeypatch, tmp_path):
-    executable = tmp_path / "tesseract"
+def test_ocr_status_uses_configured_vision_helper_without_logging_path(monkeypatch, tmp_path):
+    executable = tmp_path / "VisionOCR"
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o755)
-    monkeypatch.setenv("TELESHIELD_TESSERACT_PATH", str(executable))
+    monkeypatch.setenv("TELESHIELD_VISION_OCR_PATH", str(executable))
 
     status = teleshield.get_ocr_status()
 
     assert status["available"] is True
     assert status["bundled"] is False
-    assert status["languages"] == ["chi_sim", "chi_tra", "eng"]
+    assert status["languages"] == ["zh-Hant", "zh-Hans", "en"]
+
+
+def test_ocr_image_uses_configured_vision_helper(monkeypatch, tmp_path):
+    executable = tmp_path / "VisionOCR"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json\n"
+        "print(json.dumps({'text': '投资 稳赚'}, ensure_ascii=False))\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("TELESHIELD_VISION_OCR_PATH", str(executable))
+
+    recognized = teleshield.ocr_image(str(tmp_path / "message.jpg"))
+    assert recognized == "投資 穩賺"
+    assert teleshield.is_spam(recognized) is True
 
 
 def test_logout_account_calls_telegram_and_clears_local_identity(monkeypatch, tmp_path):

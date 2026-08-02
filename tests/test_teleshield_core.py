@@ -689,6 +689,12 @@ def test_simplified_text_is_normalized_for_rules_and_learning(monkeypatch, tmp_p
     assert "投資穩賺" in learned
 
 
+def test_gambling_ocr_terms_match_spam_rules():
+    recognized = "少年董雹樂城\n簡單刺激\n又好玩\n推筒子\nBAR\n嵩倍體驗"
+
+    assert teleshield.is_spam(recognized) is True
+
+
 def test_learned_pattern_listing_and_removal(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     teleshield.save_config({

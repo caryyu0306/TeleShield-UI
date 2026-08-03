@@ -1075,10 +1075,152 @@ SPAM_STRONG_PHRASES = {
     },
 }
 
+# Account-takeover phishing uses a separate evidence model from ordinary
+# advertising.  A single generic word such as ``驗證`` or ``support`` is not
+# enough; high-confidence messages combine account-state, recovery, credential
+# or impersonation language.  Simplified Chinese is listed as well as the
+# normalized Traditional form so matching remains useful when OpenCC is not
+# available in an older external installation.
+PHISHING_SIGNAL_PHRASES = {
+    "account_state": (
+        "帳號異常", "帳戶異常", "账号异常", "账户异常", "偵測到異常登入", "检测到异常登录",
+        "偵測到可疑活動", "检测到可疑活动", "可疑活動", "可疑活动", "異常活動", "异常活动",
+        "未預期的活躍波動", "未预期的活跃波动", "帳號高風險", "账号高风险", "帳戶高風險",
+        "账户高风险", "帳號遭舉報", "账号遭举报", "帳號已被標記", "账号已被标记",
+        "功能受限", "功能限制", "暂时限制", "暫時限制", "帳號凍結", "账号冻结",
+        "帳戶凍結", "账户冻结", "帳號停用", "账号停用", "帳號封鎖", "账号封锁",
+        "帳號將被註銷", "账号将被注销", "帳號將被刪除", "账号将被删除", "永久限制",
+        "your account has been flagged", "your account is at high risk", "your account is restricted",
+        "your account has been restricted", "your account is frozen", "account has been restricted",
+        "account is frozen", "your account is at risk", "account is at risk", "account is locked",
+        "your account is locked", "your account has been compromised", "account has been compromised",
+        "security alert", "suspicious activity detected", "unusual activity detected",
+        "suspicious activity", "unusual activity", "suspicious login", "unusual login",
+        "your account will be permanently restricted", "your account will be deleted", "your account will be closed",
+        "account will be deleted", "account will be closed", "your account will be disabled", "violated telegram rules",
+    ),
+    "recovery": (
+        "恢復帳號", "恢復帳戶", "恢复账号", "恢复账户", "恢復存取權", "恢复存取权",
+        "申請恢復帳號", "申請恢復帳戶", "申请恢复账号", "申请恢复账户", "立即申請恢復", "立即申请恢复",
+        "解除限制", "解除帳號限制", "解除账户限制", "解凍帳號", "解凍帳戶", "解冻账号", "解冻账户",
+        "提交申訴", "提交申诉", "帳號申訴", "账号申诉",
+        "重新驗證帳號", "重新验证账号", "完成安全驗證", "完成安全验证", "完成問題處理", "完成问题处理",
+        "確認帳號狀態", "确认账号状态", "restore your account", "recover your account",
+        "unfreeze your account", "unlock your account", "restore access", "restore access to your account",
+        "remove the restriction", "remove account restriction", "submit an appeal", "appeal the restriction",
+    ),
+    "credential_action": (
+        "輸入手機號碼", "输入手机号码", "提供手機號碼", "提供手机号码", "輸入登入碼", "输入登录码",
+        "提供登入碼", "提供登录码", "回傳驗證碼", "回传验证码", "輸入驗證碼", "输入验证码",
+        "一次性驗證碼", "一次性验证码", "驗證碼", "验证码", "掃描 QR Code", "扫描 QR Code",
+        "掃描QR Code", "扫描QR Code", "掃描 QR 碼", "扫描 QR 码", "連結新裝置", "链接新装置",
+        "連結裝置", "链接装置", "授權新裝置", "授权新装置", "點擊連結", "点击链接",
+        "點擊下方按鈕", "点击下方按钮", "登入官網", "登录官网", "外部網站驗證", "外部网站验证",
+        "enter the verification code", "enter a verification code", "enter your login code",
+        "enter your phone number", "provide your phone number", "send us the code", "send the code",
+        "share the code", "one-time password", "one time password", "scan the qr code",
+        "scanning the qr code", "scanning a qr code", "scan this qr code", "scan a qr code", "scan qr code",
+        "link a new device",
+        "authorize a new device", "authorize new device", "click the link", "click here to restore",
+        "click here to verify", "click to verify", "click here to unlock", "click here to appeal",
+        "verify now", "confirm your account", "confirm your identity", "verification link",
+        "follow the link", "open this link",
+        "log in to verify", "log in to the official website", "visit the official website",
+        "verify your account", "verify your identity", "anti-bot verification", "qr proof",
+    ),
+    "impersonation": (
+        "Telegram 官方", "Telegram客服", "Telegram 客服", "Telegram 支援", "Telegram 支持",
+        "官方客服", "官方 Telegram", "官方Telegram", "安全中心", "帳號安全中心", "账号安全中心",
+        "驗證中心", "验证中心", "系統通知", "系统通知", "帳號管理員", "账号管理员",
+        "telegram support", "telegram security", "telegram admin", "telegram administrator",
+        "official telegram", "official telegram support", "official support", "security team",
+        "security center", "account security center", "verification center", "system notification",
+    ),
+    "urgency": (
+        "立即處理", "立即处理", "請立即處理", "请立即处理", "請盡快完成", "请尽快完成",
+        "請盡快點擊", "请尽快点击", "24 小時內", "24小时内", "最後通知", "最后通知", "最後警告",
+        "最后警告", "逾期", "否则账号", "否則帳號", "立即登入", "立即登录", "立即驗證", "立即验证",
+        "立即申請", "立即申请", "緊急", "紧急", "within 24 hours", "within 12 hours", "within 24h",
+        "immediately", "urgent", "act now", "last notice", "last warning", "as soon as possible",
+        "otherwise your account", "before your account is",
+    ),
+    "vote_contest": (
+        "幫忙投票", "帮忙投票", "幫我投一票", "帮我投一票", "投一票", "支持我的朋友",
+        "比賽投票", "比赛投票", "競賽投票", "竞赛投票", "參加競賽", "参加竞赛", "抽獎", "抽奖",
+        "領取獎品", "领取奖品", "領獎", "领奖", "贏取獎品", "赢取奖品", "防機器人驗證", "防机器人验证",
+        "投票連結", "投票链接", "vote for me", "help me vote", "support my friend", "vote for my friend",
+        "contest", "competition", "win a prize", "claim your prize", "giveaway", "anti-bot check",
+    ),
+}
+
+PHISHING_SIGNAL_PATTERNS = {
+    "account_state": (
+        r"(?:帳號|帳戶|账号|账户)[\s\S]{0,16}(?:異常|异常|可疑|未預期|未预期|高風險|高风险|活躍波動|活跃波动|受限|限制|凍結|冻结|停用|封鎖|封锁|註銷|注销)",
+        r"(?:功能|帳號|帳戶|功能|账号|账户)[\s\S]{0,12}(?:受限|限制|凍結|冻结|停用|封鎖|封锁)",
+        r"(?:受限|限制|凍結|冻结|停用|封鎖|封锁)[\s\S]{0,12}(?:功能|帳號|帳戶|账号|账户)",
+        r"(?:your|the)[\s\S]{0,8}(?:telegram[\s\S]{0,4})?account[\s\S]{0,24}(?:flagged|restricted|frozen|disabled|deleted|high risk|at risk|locked|compromised|under review)",
+        r"(?:suspicious|unusual)[\s\S]{0,8}(?:activity|login|sign[- ]?in)",
+    ),
+    "recovery": (
+        r"(?:申請|申请)[\s\S]{0,8}(?:恢復|恢复|解凍|解冻)(?:帳號|帳戶|账号|账户)?",
+        r"(?:恢復|恢复|解凍|解冻)[\s\S]{0,12}(?:帳號|帳戶|账号|账户|存取權|存取权)",
+        r"(?:解除|解开)[\s\S]{0,8}(?:限制|封鎖|封锁)",
+        r"(?:restore|recover|unfreeze|unlock|remove)[\s\S]{0,16}(?:your[\s\S]{0,4})?(?:account|access|restriction)",
+        r"(?:submit|file)[\s\S]{0,8}(?:an?[\s\S]{0,4})?appeal[\s\S]{0,16}(?:account|restriction|access)?",
+    ),
+    "credential_action": (
+        r"(?:輸入|输入|提供|回傳|回传)[\s\S]{0,8}(?:手機號碼|手机号码|登入碼|登录码|驗證碼|验证码|一次性密碼|一次性密码|OTP)",
+        r"(?:掃描|扫描)[\s\S]{0,8}(?:QR|二维码|QR碼|QR码)",
+        r"(?:點擊|点击)[\s\S]{0,8}(?:連結|链接|下方按鈕|下方按钮)",
+        r"(?:enter|provide|send|share)[\s\S]{0,12}(?:the[\s\S]{0,4})?(?:verification|login|one[- ]?time|otp)[\s\S]{0,8}(?:code|password)?",
+        r"(?:scan(?:ning)?|open|follow)[\s\S]{0,12}(?:the[\s\S]{0,4})?(?:qr|link)",
+        r"(?:click|tap)[\s\S]{0,12}(?:here|below|the link)[\s\S]{0,12}(?:verify|restore|unlock|appeal|confirm)",
+        r"(?:log[\s\-]?in|visit)[\s\S]{0,16}(?:to[\s\S]{0,4})?(?:verify|official website)",
+    ),
+    "impersonation": (
+        r"(?:Telegram|telegram)[\s\S]{0,8}(?:官方|客服|支援|支持|安全|管理員|管理员|support|security|admin)",
+        r"(?:官方|official)[\s\S]{0,8}(?:客服|支援|支持|telegram|support)",
+        r"(?:security|account security|verification)[\s\-]?center",
+    ),
+    "urgency": (
+        r"(?:立即|立刻|請立即|请立即|請盡快|请尽快)[\s\S]{0,12}(?:處理|处理|完成|點擊|点击|登入|登录|驗證|验证|申請|申请)",
+        r"(?:\d{1,3})[\s]?(?:小時|小时|天|hours?|hrs?|days?)[\s\S]{0,8}(?:內|内|before|to)",
+        r"(?:within|in)[\s]+\d{1,3}[\s]*(?:hours?|hrs?|days?|minutes?)",
+        r"(?:otherwise|if you do not)[\s\S]{0,20}(?:your[\s\S]{0,4})?account[\s\S]{0,16}(?:restricted|deleted|disabled|blocked)",
+    ),
+    "vote_contest": (
+        r"(?:幫|帮)[\s\S]{0,6}(?:我)?[\s\S]{0,4}投(?:一票|票)",
+        r"(?:vote|support)[\s\S]{0,16}(?:me|my friend|a friend|contest|competition)",
+        r"(?:contest|competition)[\s\S]{0,16}(?:vote|qr|link)",
+    ),
+}
+
+PHISHING_SIGNAL_WEIGHTS = {
+    "account_state": 2,
+    "recovery": 2,
+    "credential_action": 3,
+    "impersonation": 2,
+    "urgency": 1,
+    "vote_contest": 1,
+}
+
+PHISHING_STRONG_PHRASES = {
+    "帳號將被註銷", "账号将被注销", "帳號將被刪除", "账号将被删除",
+    "帳號將被永久限制", "账号将被永久限制",
+    "申請恢復帳號", "申請恢復帳戶", "申请恢复账号", "申请恢复账户", "恢復存取權", "恢复存取权",
+    "解除帳號限制", "解除账户限制",
+    "輸入登入碼", "输入登录码", "回傳驗證碼", "回传验证码", "掃描 QR Code", "扫描 QR Code",
+    "授權新裝置", "授权新装置", "your account will be permanently restricted", "your account will be deleted", "your account will be closed",
+    "restore your account", "unfreeze your account", "restore access", "enter the verification code",
+    "scan the qr code", "link a new device",
+}
+
 # Kept as a compatibility surface for callers that import the old constant.
 SPAM_PATTERNS = [
     *[pattern for patterns in SPAM_CATEGORY_PATTERNS.values() for pattern in patterns],
     *[re.escape(phrase) for phrases in SPAM_CATEGORY_PHRASES.values() for phrase in phrases],
+    *[pattern for patterns in PHISHING_SIGNAL_PATTERNS.values() for pattern in patterns],
+    *[re.escape(phrase) for phrases in PHISHING_SIGNAL_PHRASES.values() for phrase in phrases],
 ]
 
 DEFAULT_SCAN_SETTINGS = {
@@ -2106,9 +2248,19 @@ def _contains_phonetic_form(
 
 
 def _is_strong_literal(literal: str) -> bool:
+    normalized_literal = normalize_message_text(literal)
     return any(
         literal in phrases
+        or normalized_literal in {normalize_message_text(phrase) for phrase in phrases}
         for phrases in (*SPAM_STRONG_PHRASES.values(), *SPAM_STRONG_INTENT_PHRASES.values())
+    ) or _is_phishing_strong_literal(literal)
+
+
+def _is_phishing_strong_literal(literal: str) -> bool:
+    normalized_literal = normalize_message_text(literal)
+    return literal in PHISHING_STRONG_PHRASES or any(
+        normalized_literal == normalize_message_text(phrase)
+        for phrase in PHISHING_STRONG_PHRASES
     )
 
 
@@ -2295,6 +2447,51 @@ def _find_pattern_match(message_forms: dict[str, str], pattern: str) -> Optional
     return None
 
 
+def _find_phishing_signal_matches(
+    message_forms: dict[str, str],
+    phrases: tuple[str, ...],
+    patterns: tuple[str, ...],
+    has_cjk_input: bool,
+) -> list[dict[str, str]]:
+    """Find one explainable set of matches for one phishing evidence group.
+
+    The existing CJK matcher intentionally marks unfamiliar two-character
+    homophones as ambiguous.  Longer account-takeover phrases remain useful
+    when mixed characters are inserted, while short generic words such as
+    ``客服`` or ``投票`` stay conservative.
+    """
+    matches: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add_match(match: Optional[dict[str, str]], source: str) -> None:
+        if not match:
+            return
+        if _is_ambiguous_match(match) and has_cjk_input:
+            literal = _compact_matching_text(str(match.get("literal", "")))
+            if (
+                match.get("confidence") != "ambiguous_skeleton"
+                or not literal
+                or not all(_is_cjk_character(character) for character in literal)
+                or len(literal) < 4
+            ):
+                return
+        identity = (
+            source,
+            str(match.get("literal") or match.get("pattern") or ""),
+            str(match.get("channel", "")),
+        )
+        if identity in seen:
+            return
+        seen.add(identity)
+        matches.append(match)
+
+    for phrase in phrases:
+        add_match(_find_literal_match(message_forms, phrase), "literal")
+    for pattern in patterns:
+        add_match(_find_pattern_match(message_forms, pattern), "pattern")
+    return matches
+
+
 def _obfuscation_signals(original: str, normalized: str) -> list[str]:
     signals = []
     if _ZERO_WIDTH_RE.search(original):
@@ -2332,6 +2529,11 @@ def analyze_spam(
             "learned_matches": [],
             "matched_rules": [],
             "obfuscation": [],
+            "phishing_signals": [],
+            "phishing_matches": [],
+            "phishing_score": 0,
+            "phishing_group_count": 0,
+            "phishing_should_block": False,
         }
 
     normalized = normalize_message_text(original)
@@ -2341,7 +2543,11 @@ def analyze_spam(
     intents: list[str] = []
     matched_rules: list[dict[str, str]] = []
     learned_matches: list[dict[str, str]] = []
+    phishing_signals: list[str] = []
+    phishing_matches: list[dict[str, str]] = []
+    phishing_score = 0
     score = 0
+    sender_context = sender_context or {}
 
     for category, phrases in SPAM_CATEGORY_PHRASES.items():
         category_matches = []
@@ -2409,6 +2615,47 @@ def analyze_spam(
     if obfuscation and (categories or intents):
         score += 1
 
+    for signal, phrases in PHISHING_SIGNAL_PHRASES.items():
+        signal_matches = _find_phishing_signal_matches(
+            message_forms,
+            phrases,
+            PHISHING_SIGNAL_PATTERNS.get(signal, ()),
+            has_cjk_input,
+        )
+        if not signal_matches:
+            continue
+        phishing_signals.append(signal)
+        phishing_score += PHISHING_SIGNAL_WEIGHTS.get(signal, 1)
+        signal_matches_with_group = [
+            {"signal": signal, **match}
+            for match in signal_matches
+        ]
+        phishing_matches.extend(signal_matches_with_group)
+        matched_rules.extend(
+            {"group": f"phishing_{signal}", **match}
+            for match in signal_matches_with_group
+        )
+
+    if phishing_signals:
+        categories.append("account_takeover")
+
+    phishing_has_strong_phrase = any(
+        _is_phishing_strong_literal(str(match.get("literal", "")))
+        for match in phishing_matches
+    )
+    phishing_group_count = len(phishing_signals)
+    phishing_sender_flagged = bool(
+        sender_context.get("telegram_scam") or sender_context.get("telegram_fake")
+    )
+    phishing_should_block = bool(
+        phishing_has_strong_phrase
+        or (
+            phishing_group_count >= 2
+            and phishing_score >= SPAM_BLOCK_SCORE
+        )
+        or (phishing_sender_flagged and phishing_score >= 2)
+    )
+
     explicit_rule_match = False
     if cfg is not None:
         learned = get_learned_patterns(cfg, account_id=account_id)
@@ -2423,7 +2670,6 @@ def analyze_spam(
                 explicit_rule_match = True
                 learned_matches.append({"kind": "keywords", **match})
 
-    sender_context = sender_context or {}
     if sender_context.get("telegram_scam") or sender_context.get("telegram_fake"):
         score += 3
         matched_rules.append({"group": "sender", "literal": "Telegram scam/fake flag", "channel": "metadata"})
@@ -2431,7 +2677,8 @@ def analyze_spam(
         score += 1
         matched_rules.append({"group": "sender", "literal": "new sender", "channel": "metadata"})
 
-    should_block = explicit_rule_match or score >= SPAM_BLOCK_SCORE
+    legacy_should_block = score >= SPAM_BLOCK_SCORE
+    should_block = explicit_rule_match or legacy_should_block or phishing_should_block
     return {
         "text": original,
         "normalized_text": normalized,
@@ -2444,6 +2691,11 @@ def analyze_spam(
         "learned_matches": learned_matches,
         "matched_rules": matched_rules,
         "obfuscation": obfuscation,
+        "phishing_signals": phishing_signals,
+        "phishing_matches": phishing_matches,
+        "phishing_score": phishing_score,
+        "phishing_group_count": phishing_group_count,
+        "phishing_should_block": phishing_should_block,
     }
 
 

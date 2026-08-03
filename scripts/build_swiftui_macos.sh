@@ -20,6 +20,7 @@ test -f "$ICON_FILE"
   --console \
   --name TeleShieldCore \
   --collect-data opencc \
+  --collect-data pypinyin \
   core_service.py
 
 "$PYTHON_BIN" "${ROOT_DIR}/scripts/dedupe_macos_dylibs.py" "$SIDECAR_DIR"

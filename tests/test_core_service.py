@@ -264,6 +264,7 @@ class FakeParityCore(FakeCore):
 
     def get_moderation_policy(self, account_id=None):
         return dict(self.policies.get(account_id, {
+            "protection_mode": "normal",
             "delete_private_history_after_block": False,
             "delete_private_history_scope": "self",
             "telegram_notification": {
@@ -354,6 +355,7 @@ def test_account_details_exposes_global_auto_start_and_omits_credentials():
     assert "api_id" not in details
     assert "api_hash" not in details
     assert details["moderation_policy"] == {
+        "protection_mode": "normal",
         "delete_private_history_after_block": False,
         "delete_private_history_scope": "self",
         "telegram_notification": {
@@ -388,6 +390,7 @@ def test_moderation_policy_rpc_is_explicitly_account_scoped():
     service = CoreService(core=core, platform=FakePlatform())
 
     assert service.dispatch("get_moderation_policy", {"account_id": "account-a"}) == {
+        "protection_mode": "normal",
         "delete_private_history_after_block": False,
         "delete_private_history_scope": "self",
         "telegram_notification": {
@@ -401,6 +404,7 @@ def test_moderation_policy_rpc_is_explicitly_account_scoped():
         {
             "account_id": "account-b",
             "updates": {
+                "protection_mode": "strict",
                 "delete_private_history_after_block": True,
                 "delete_private_history_scope": "both",
                 "telegram_notification": {
@@ -411,6 +415,7 @@ def test_moderation_policy_rpc_is_explicitly_account_scoped():
             },
         },
     ) == {
+        "protection_mode": "strict",
         "delete_private_history_after_block": True,
         "delete_private_history_scope": "both",
         "telegram_notification": {
@@ -420,6 +425,7 @@ def test_moderation_policy_rpc_is_explicitly_account_scoped():
         },
     }
     assert service.dispatch("get_moderation_policy", {"account_id": "account-a"}) == {
+        "protection_mode": "normal",
         "delete_private_history_after_block": False,
         "delete_private_history_scope": "self",
         "telegram_notification": {
@@ -429,6 +435,7 @@ def test_moderation_policy_rpc_is_explicitly_account_scoped():
         },
     }
     assert ("update_moderation_policy", {
+        "protection_mode": "strict",
         "delete_private_history_after_block": True,
         "delete_private_history_scope": "both",
         "telegram_notification": {

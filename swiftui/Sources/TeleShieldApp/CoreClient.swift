@@ -474,6 +474,7 @@ final class CoreClient: ObservableObject {
         do {
             guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else { return false }
             let updates: [String: JSONValue] = [
+                "protection_mode": .string(policy.protectionMode.rawValue),
                 "delete_private_history_after_block": .bool(policy.deletePrivateHistoryAfterBlock),
                 "delete_private_history_scope": .string(policy.deletePrivateHistoryScope.rawValue),
                 "telegram_notification": .object([

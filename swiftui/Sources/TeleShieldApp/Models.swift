@@ -156,6 +156,29 @@ enum PrivateHistoryDeletionScope: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum ProtectionMode: String, Codable, CaseIterable, Identifiable {
+    case normal
+    case strict
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .normal: return "一般模式"
+        case .strict: return "嚴格模式"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .normal:
+            return "只封鎖高信心判定為垃圾訊息的非聯絡人。"
+        case .strict:
+            return "非聯絡人一律封鎖；只有聯絡人與白名單可以傳訊息。"
+        }
+    }
+}
+
 struct TelegramNotificationPolicy: Codable, Equatable {
     var enabled: Bool
     var botToken: String
@@ -188,27 +211,32 @@ struct TelegramNotificationPolicy: Codable, Equatable {
 }
 
 struct ModerationPolicy: Codable, Equatable {
+    var protectionMode: ProtectionMode
     var deletePrivateHistoryAfterBlock: Bool
     var deletePrivateHistoryScope: PrivateHistoryDeletionScope
     var telegramNotification: TelegramNotificationPolicy
 
     static let defaults = ModerationPolicy(
+        protectionMode: .normal,
         deletePrivateHistoryAfterBlock: false,
         deletePrivateHistoryScope: .selfOnly,
         telegramNotification: .defaults
     )
 
     enum CodingKeys: String, CodingKey {
+        case protectionMode = "protection_mode"
         case deletePrivateHistoryAfterBlock = "delete_private_history_after_block"
         case deletePrivateHistoryScope = "delete_private_history_scope"
         case telegramNotification = "telegram_notification"
     }
 
     init(
+        protectionMode: ProtectionMode = .normal,
         deletePrivateHistoryAfterBlock: Bool,
         deletePrivateHistoryScope: PrivateHistoryDeletionScope,
         telegramNotification: TelegramNotificationPolicy
     ) {
+        self.protectionMode = protectionMode
         self.deletePrivateHistoryAfterBlock = deletePrivateHistoryAfterBlock
         self.deletePrivateHistoryScope = deletePrivateHistoryScope
         self.telegramNotification = telegramNotification
@@ -216,6 +244,11 @@ struct ModerationPolicy: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawMode = try container.decodeIfPresent(
+            String.self,
+            forKey: .protectionMode
+        ) ?? Self.defaults.protectionMode.rawValue
+        protectionMode = ProtectionMode(rawValue: rawMode) ?? .normal
         deletePrivateHistoryAfterBlock = try container.decodeIfPresent(
             Bool.self,
             forKey: .deletePrivateHistoryAfterBlock

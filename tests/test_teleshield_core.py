@@ -282,12 +282,127 @@ def test_scan_history_private_applies_block_and_records_result(monkeypatch, tmp_
     assert teleshield.load_block_log()["blocks"][0]["source"] == "scan"
 
 
+def test_strict_mode_scans_and_blocks_non_contacts_without_waiting_for_text(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_config({
+        "api_id": 1234,
+        "api_hash": "[REDACTED]",
+        "user_id": 1,
+        "blocked_count": 0,
+        "whitelist": {},
+        "blacklist": {},
+        "moderation_policy": {"protection_mode": "strict"},
+    })
+
+    contact = User(id=3, is_self=False, bot=False, first_name="Contact")
+    stranger = User(id=2, is_self=False, bot=False, first_name="Stranger")
+
+    class FakeClient:
+        block_requests = 0
+
+        def __init__(self, *args):
+            pass
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_dialogs(self, limit):
+            return [SimpleNamespace(entity=contact), SimpleNamespace(entity=stranger)]
+
+        async def get_messages(self, entity, limit):
+            raise AssertionError("嚴格模式不應讀取歷史訊息內容")
+
+        async def __call__(self, request):
+            if type(request).__name__ == "BlockRequest":
+                type(self).block_requests += 1
+                return SimpleNamespace()
+            return SimpleNamespace(users=[contact])
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        result = asyncio.run(teleshield.scan_history("private", dry_run=False))
+
+    assert result["dialogs_scanned"] == 1
+    assert result["messages_scanned"] == 1
+    assert result["matched"] == 1
+    assert result["acted"] == 1
+    assert FakeClient.block_requests == 1
+    assert teleshield.load_block_log()["blocks"][0]["reason"] == "嚴格模式：非聯絡人"
+
+
+def test_realtime_first_message_blocks_homophone_without_url(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_config({
+        "api_id": 1234,
+        "api_hash": "[REDACTED]",
+        "user_id": 1,
+        "blocked_count": 0,
+        "whitelist": {},
+        "blacklist": {},
+    })
+    stranger = User(id=2, is_self=False, bot=False, first_name="Stranger")
+    registered_handlers = []
+
+    class FakeEvent:
+        message = SimpleNamespace(sender_id=2, text="偷資群組", photo=None)
+
+        async def get_chat(self):
+            return stranger
+
+        async def get_sender(self):
+            return stranger
+
+    class FakeClient:
+        block_requests = 0
+
+        def __init__(self, *args):
+            pass
+
+        def on(self, event):
+            def register(handler):
+                registered_handlers.append(handler)
+                return handler
+            return register
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def run_until_disconnected(self):
+            await registered_handlers[0](FakeEvent())
+
+        async def __call__(self, request):
+            if type(request).__name__ == "BlockRequest":
+                type(self).block_requests += 1
+                return SimpleNamespace()
+            return SimpleNamespace(users=[])
+
+    with patch.object(telethon, "TelegramClient", FakeClient):
+        result = asyncio.run(teleshield.listen())
+
+    assert result is True
+    assert FakeClient.block_requests == 1
+    assert teleshield.load_config()["blocked_count"] == 1
+    assert teleshield.load_block_log()["blocks"][0]["reason"] == "偷資群組"
+
+
 def test_private_history_policy_is_account_scoped_and_requires_successful_block(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     teleshield.create_account("account-a")
     teleshield.create_account("account-b")
 
     assert teleshield.get_moderation_policy(account_id="account-a") == {
+        "protection_mode": "normal",
         "delete_private_history_after_block": False,
         "delete_private_history_scope": "self",
         "telegram_notification": {
@@ -298,6 +413,7 @@ def test_private_history_policy_is_account_scoped_and_requires_successful_block(
     }
     assert teleshield.update_moderation_policy(
         {
+            "protection_mode": "normal",
             "delete_private_history_after_block": True,
             "delete_private_history_scope": "both",
             "telegram_notification": {
@@ -308,6 +424,7 @@ def test_private_history_policy_is_account_scoped_and_requires_successful_block(
         },
         account_id="account-a",
     ) == {
+        "protection_mode": "normal",
         "delete_private_history_after_block": True,
         "delete_private_history_scope": "both",
         "telegram_notification": {
@@ -319,6 +436,14 @@ def test_private_history_policy_is_account_scoped_and_requires_successful_block(
     assert teleshield.get_moderation_policy(account_id="account-b")[
         "delete_private_history_after_block"
     ] is False
+
+    assert teleshield.update_moderation_policy(
+        {"protection_mode": "strict"}, account_id="account-b"
+    )["protection_mode"] == "strict"
+    with pytest.raises(ValueError, match="protection_mode"):
+        teleshield.update_moderation_policy(
+            {"protection_mode": "unknown"}, account_id="account-b"
+        )
 
     teleshield.save_config({
         "api_id": 1234,
@@ -687,6 +812,265 @@ def test_simplified_text_is_normalized_for_rules_and_learning(monkeypatch, tmp_p
     assert result["normalized_text"] == "加微信 投資穩賺"
     learned = teleshield.load_config()["learned_patterns"]["keywords"]
     assert "投資穩賺" in learned
+
+
+@pytest.mark.parametrize(
+    "ordinary_text",
+    [
+        "我想出去買菜",
+        "彩色筆很好用",
+        "請出示文件",
+        "我賣出了舊手機",
+        "大家來討論博物館",
+    ],
+)
+def test_common_chinese_text_does_not_match_single_character_spam_rules(ordinary_text):
+    decision = teleshield.analyze_spam(ordinary_text)
+    assert decision["should_block"] is False
+    assert decision["categories"] == []
+    assert decision["intents"] == []
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "投資群組",
+        "偷資群組",
+        "頭姿",
+        "頭茲",
+        "頭資",
+        "投 資 群 組",
+        "投\u200b資群組",
+        "tou zi qun zu",
+        "ㄊㄡˊ ㄗ ㄑㄩㄣˊ ㄗㄨˇ",
+        "ｔｏｕ　ｚｉ　ｑｕｎ　ｚｕ",
+    ],
+)
+def test_spam_rules_match_traditional_simplified_homophone_and_phonetic_variants(variant):
+    decision = teleshield.analyze_spam(variant)
+    assert decision["should_block"] is True
+    assert "investment" in decision["categories"]
+
+
+def test_first_message_without_url_uses_content_and_sender_signals():
+    decision = teleshield.analyze_spam(
+        "保證獲利，私訊我加 LINE",
+        sender_context={"new_sender": True},
+    )
+    assert decision["should_block"] is True
+    assert decision["score"] >= decision["threshold"]
+    assert {"guarantee", "contact"}.issubset(decision["intents"])
+
+
+@pytest.mark.parametrize(
+    "canonical",
+    [
+        "投資",
+        "賭博",
+        "色情",
+        "詐騙",
+        "兼職",
+        "比特幣",
+        "加微信",
+        "立即加入",
+        "保證獲利",
+        "付款",
+        "轉帳",
+    ],
+)
+def test_default_high_risk_rules_match_pinyin_and_zhuyin(canonical):
+    forms = teleshield.build_message_forms(canonical)
+
+    pinyin_decision = teleshield.analyze_spam(forms["pinyin"])
+    zhuyin_decision = teleshield.analyze_spam(forms["zhuyin"])
+
+    assert pinyin_decision["should_block"] is True
+    assert zhuyin_decision["should_block"] is True
+
+
+def test_phonetic_matching_does_not_create_partial_syllable_category_hits():
+    decision = teleshield.analyze_spam("詐騙")
+
+    assert decision["should_block"] is True
+    assert decision["categories"] == ["fraud"]
+    assert "adult" not in decision["categories"]
+
+
+def test_message_forms_keep_tones_and_tone_less_phonetic_channels():
+    forms = teleshield.build_message_forms("投資群組")
+
+    assert forms["pinyin_tone"] == "tou2 zi1 qun2 zu3"
+    assert forms["pinyin"] == "tou zi qun zu"
+    assert forms["zhuyin_tone"] == "ㄊㄡˊ ㄗ ㄑㄩㄣˊ ㄗㄨˇ"
+    assert forms["zhuyin"] == "ㄊㄡ ㄗ ㄑㄩㄣ ㄗㄨ"
+
+
+def test_phonetic_normalization_does_not_block_ambiguous_homophones():
+    decision = teleshield.analyze_spam("請出示文件")
+    assert decision["should_block"] is False
+    assert decision["categories"] == []
+
+
+@pytest.mark.parametrize(
+    "variant, skeleton, category",
+    [
+        ("偷price姿321", "偷姿", "investment"),
+        ("偷12g姿pri22", "偷姿", "investment"),
+        ("詐asg片333", "詐片", "fraud"),
+        ("堵888伯ccc", "堵伯", "gambling"),
+        ("頭🤑3茲price", "頭茲", "investment"),
+    ],
+)
+def test_cjk_skeleton_matches_mixed_english_numbers_and_emoji(
+    variant, skeleton, category
+):
+    forms = teleshield.build_message_forms(variant)
+    decision = teleshield.analyze_spam(variant)
+
+    assert forms["cjk_skeleton"] == skeleton
+    assert forms["cjk_skeleton_pinyin"]
+    assert forms["cjk_skeleton_zhuyin"]
+    assert decision["should_block"] is True
+    assert category in decision["categories"]
+    assert "alphanumeric_between_chinese" in decision["obfuscation"]
+
+
+def test_cjk_skeleton_is_the_match_source_when_alphanumeric_breaks_phonetics():
+    decision = teleshield.analyze_spam("偷price姿321")
+
+    assert any(
+        rule.get("channel", "").startswith("cjk_skeleton_")
+        for rule in decision["matched_rules"]
+    )
+
+
+def test_cjk_skeleton_keeps_generic_homophones_ambiguous():
+    decision = teleshield.analyze_spam("文price件")
+
+    assert decision["should_block"] is False
+    assert decision["categories"] == []
+    assert decision["intents"] == []
+
+
+@pytest.mark.parametrize(
+    "learned_keyword, variant",
+    [
+        ("投資", "偷price姿321"),
+        ("詐騙", "詐asg片333"),
+    ],
+)
+def test_learned_chinese_keyword_uses_cjk_skeleton(learned_keyword, variant):
+    cfg = {"learned_patterns": {"keywords": [learned_keyword], "patterns": []}}
+
+    decision = teleshield.analyze_spam(variant, cfg)
+
+    assert decision["should_block"] is True
+    assert any(
+        match.get("kind") == "keywords"
+        and match.get("channel", "").startswith("cjk_skeleton_")
+        for match in decision["learned_matches"]
+    )
+
+
+def test_learned_literal_pattern_uses_cjk_skeleton():
+    cfg = {
+        "learned_patterns": {
+            "keywords": [],
+            "patterns": [r"投資"],
+        }
+    }
+
+    decision = teleshield.analyze_spam("偷12g姿pri22", cfg)
+
+    assert decision["should_block"] is True
+    assert any(
+        match.get("kind") == "patterns"
+        and match.get("channel", "").startswith("cjk_skeleton_")
+        for match in decision["learned_matches"]
+    )
+
+
+def test_learning_mixed_cjk_sample_stores_a_reusable_skeleton(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_config({"learned_patterns": {"keywords": [], "patterns": []}})
+
+    result = teleshield.learn_text("藍price星321")
+
+    assert "藍星" in result["added_keywords"]
+    assert teleshield.is_spam("蘭foo星999", teleshield.load_config()) is True
+
+
+def test_cjk_skeleton_does_not_change_english_rule_forms():
+    forms = teleshield.build_message_forms("free bitcoin")
+    decision = teleshield.analyze_spam("free bitcoin")
+
+    assert "cjk_skeleton" not in forms
+    assert decision["should_block"] is True
+    assert "crypto" in decision["categories"]
+
+
+def test_learned_keyword_uses_the_same_phonetic_forms(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    cfg = {"learned_patterns": {"keywords": ["投資群組"], "patterns": []}}
+
+    assert teleshield.is_spam("偷資群組", cfg) is True
+    assert teleshield.is_spam("tou zi qun zu", cfg) is True
+    assert teleshield.is_spam("ㄊㄡˊ ㄗ ㄑㄩㄣˊ ㄗㄨˇ", cfg) is True
+
+
+def test_learned_single_character_rule_is_not_dropped():
+    cfg = {"learned_patterns": {"keywords": ["賭"], "patterns": []}}
+
+    assert teleshield.is_spam("賭", cfg) is True
+
+
+def test_user_learned_keyword_generates_runtime_homophone_match(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_config({"learned_patterns": {"keywords": [], "patterns": []}})
+
+    result = teleshield.learn_text("藍星財富")
+
+    assert "藍星財富" in result["added_keywords"]
+    assert teleshield.is_spam("蘭星財富", teleshield.load_config()) is True
+
+
+def test_user_learned_literal_pattern_uses_phonetic_forms():
+    cfg = {
+        "learned_patterns": {
+            "keywords": [],
+            "patterns": [r"藍星財富"],
+        }
+    }
+
+    decision = teleshield.analyze_spam("蘭星財富", cfg)
+
+    assert decision["should_block"] is True
+    assert decision["learned_matches"][0]["channel"] == "pinyin"
+
+
+def test_ocr_content_uses_the_same_homophone_pipeline(monkeypatch):
+    message = SimpleNamespace(text="", photo=True)
+
+    async def fake_check_photo(client, msg):
+        assert msg is message
+        return "頭姿\n頭茲\n頭資"
+
+    monkeypatch.setattr(teleshield, "check_photo", fake_check_photo)
+    result = asyncio.run(
+        teleshield.analyze_message_content(
+            object(),
+            message,
+            sender_context={"new_sender": True},
+        )
+    )
+
+    assert result["source"] == "ocr"
+    assert result["text"] == "[OCR] 頭姿\n頭茲\n頭資"
+    assert result["decision"]["should_block"] is True
+    assert any(
+        rule.get("channel") == "pinyin"
+        for rule in result["decision"]["matched_rules"]
+    )
 
 
 @pytest.mark.parametrize(

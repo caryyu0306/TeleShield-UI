@@ -911,6 +911,104 @@ def test_phonetic_normalization_does_not_block_ambiguous_homophones():
     assert decision["categories"] == []
 
 
+@pytest.mark.parametrize(
+    "variant, skeleton, category",
+    [
+        ("偷price姿321", "偷姿", "investment"),
+        ("偷12g姿pri22", "偷姿", "investment"),
+        ("詐asg片333", "詐片", "fraud"),
+        ("堵888伯ccc", "堵伯", "gambling"),
+        ("頭🤑3茲price", "頭茲", "investment"),
+    ],
+)
+def test_cjk_skeleton_matches_mixed_english_numbers_and_emoji(
+    variant, skeleton, category
+):
+    forms = teleshield.build_message_forms(variant)
+    decision = teleshield.analyze_spam(variant)
+
+    assert forms["cjk_skeleton"] == skeleton
+    assert forms["cjk_skeleton_pinyin"]
+    assert forms["cjk_skeleton_zhuyin"]
+    assert decision["should_block"] is True
+    assert category in decision["categories"]
+    assert "alphanumeric_between_chinese" in decision["obfuscation"]
+
+
+def test_cjk_skeleton_is_the_match_source_when_alphanumeric_breaks_phonetics():
+    decision = teleshield.analyze_spam("偷price姿321")
+
+    assert any(
+        rule.get("channel", "").startswith("cjk_skeleton_")
+        for rule in decision["matched_rules"]
+    )
+
+
+def test_cjk_skeleton_keeps_generic_homophones_ambiguous():
+    decision = teleshield.analyze_spam("文price件")
+
+    assert decision["should_block"] is False
+    assert decision["categories"] == []
+    assert decision["intents"] == []
+
+
+@pytest.mark.parametrize(
+    "learned_keyword, variant",
+    [
+        ("投資", "偷price姿321"),
+        ("詐騙", "詐asg片333"),
+    ],
+)
+def test_learned_chinese_keyword_uses_cjk_skeleton(learned_keyword, variant):
+    cfg = {"learned_patterns": {"keywords": [learned_keyword], "patterns": []}}
+
+    decision = teleshield.analyze_spam(variant, cfg)
+
+    assert decision["should_block"] is True
+    assert any(
+        match.get("kind") == "keywords"
+        and match.get("channel", "").startswith("cjk_skeleton_")
+        for match in decision["learned_matches"]
+    )
+
+
+def test_learned_literal_pattern_uses_cjk_skeleton():
+    cfg = {
+        "learned_patterns": {
+            "keywords": [],
+            "patterns": [r"投資"],
+        }
+    }
+
+    decision = teleshield.analyze_spam("偷12g姿pri22", cfg)
+
+    assert decision["should_block"] is True
+    assert any(
+        match.get("kind") == "patterns"
+        and match.get("channel", "").startswith("cjk_skeleton_")
+        for match in decision["learned_matches"]
+    )
+
+
+def test_learning_mixed_cjk_sample_stores_a_reusable_skeleton(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_config({"learned_patterns": {"keywords": [], "patterns": []}})
+
+    result = teleshield.learn_text("藍price星321")
+
+    assert "藍星" in result["added_keywords"]
+    assert teleshield.is_spam("蘭foo星999", teleshield.load_config()) is True
+
+
+def test_cjk_skeleton_does_not_change_english_rule_forms():
+    forms = teleshield.build_message_forms("free bitcoin")
+    decision = teleshield.analyze_spam("free bitcoin")
+
+    assert "cjk_skeleton" not in forms
+    assert decision["should_block"] is True
+    assert "crypto" in decision["categories"]
+
+
 def test_learned_keyword_uses_the_same_phonetic_forms(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     cfg = {"learned_patterns": {"keywords": ["投資群組"], "patterns": []}}

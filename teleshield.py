@@ -1539,6 +1539,12 @@ def learn_text(text: str, account_id: Optional[str] = None) -> dict:
     learned = get_learned_patterns(cfg, account_id)
 
     tokens = re.findall(r"[\u4e00-\u9fff]{2,6}", text)
+    skeleton, _, has_alphanumeric_interleave = _extract_cjk_skeleton(text)
+    if has_alphanumeric_interleave and 2 <= len(skeleton) <= 6:
+        # Preserve a short Chinese skeleton when a user learns a sample that
+        # already contains inserted English or numbers.  The stored Chinese
+        # keyword can then reuse the normal phonetic and skeleton matchers.
+        tokens.append(skeleton)
     stop_words = {
         "我們", "他們", "可以", "沒有", "這個", "那個", "什麼", "因為", "所以", "但是",
         "如果", "雖然", "然後", "而且", "或者", "不過", "還是", "就是", "不是", "一個",
@@ -1955,11 +1961,85 @@ def _strip_phonetic_tones(value: str) -> str:
     return _PHONETIC_TONE_RE.sub("", value)
 
 
+def _build_phonetic_forms(text: str, key_prefix: str = "") -> dict[str, str]:
+    """Build tone-aware and tone-less pinyin/Zhuyin forms for ``text``."""
+    forms: dict[str, str] = {}
+    if _PinyinStyle is None:
+        return forms
+
+    representations = (
+        ("pinyin_tone", _PinyinStyle.TONE3),
+        ("pinyin", _PinyinStyle.NORMAL),
+        ("zhuyin_tone", _PinyinStyle.BOPOMOFO),
+    )
+    for name, style in representations:
+        value = _phoneticize_cjk(text, style)
+        if not value:
+            continue
+        form_name = f"{key_prefix}{name}"
+        forms[form_name] = value
+        forms[f"{form_name}_compact"] = _compact_matching_text(value)
+        if name == "zhuyin_tone":
+            loose = _strip_phonetic_tones(value)
+            loose_name = f"{key_prefix}zhuyin"
+            forms[loose_name] = loose
+            forms[f"{loose_name}_compact"] = _compact_matching_text(loose)
+        elif name == "pinyin_tone":
+            # TONE3 uses trailing digits, which is convenient for exact and
+            # tone-insensitive matching without Unicode combining marks.
+            loose = _strip_phonetic_tones(value)
+            loose_name = f"{key_prefix}pinyin_loose"
+            forms[loose_name] = loose
+            forms[f"{loose_name}_compact"] = _compact_matching_text(loose)
+    return forms
+
+
+def _extract_cjk_skeleton(normalized: str) -> tuple[str, bool, bool]:
+    """Return CJK-only text and whether non-CJK content was inserted between it.
+
+    The skeleton is an additional matching representation.  It must never
+    replace the readable normalized text because English words, numbers,
+    URLs, and emoji remain meaningful to the existing matching channels.
+    """
+    positions = [
+        index for index, character in enumerate(normalized)
+        if _is_cjk_character(character)
+    ]
+    skeleton = "".join(normalized[index] for index in positions)
+    if len(positions) < 2:
+        return skeleton, False, False
+
+    has_interleave = False
+    has_alphanumeric_interleave = False
+    for left, right in zip(positions, positions[1:]):
+        gap = normalized[left + 1:right]
+        if not gap:
+            continue
+        has_interleave = True
+        if any(character.isalnum() and not _is_cjk_character(character) for character in gap):
+            has_alphanumeric_interleave = True
+    return skeleton, has_interleave, has_alphanumeric_interleave
+
+
+def _build_cjk_skeleton_forms(skeleton: str) -> dict[str, str]:
+    """Build matching forms for a CJK-only skeleton."""
+    if not skeleton:
+        return {}
+    forms = {
+        "cjk_skeleton": skeleton,
+        "cjk_skeleton_compact": _compact_matching_text(skeleton),
+    }
+    forms.update(_build_phonetic_forms(skeleton, "cjk_skeleton_"))
+    return forms
+
+
 def build_message_forms(text: str) -> dict[str, str]:
     """Build equivalent forms used by built-in and learned rules.
 
     Chinese, pinyin, and Zhuyin are parallel representations of one message;
-    callers should treat a hit in any of them as one content signal.
+    callers should treat a hit in any of them as one content signal.  When
+    non-CJK content is inserted between Chinese characters, an additional
+    CJK-only skeleton is built without changing the original channels.
     """
     normalized = normalize_message_text(text)
     forms: dict[str, str] = {
@@ -1971,30 +2051,11 @@ def build_message_forms(text: str) -> dict[str, str]:
         forms["leet"] = leet
         forms["leet_compact"] = _compact_matching_text(leet)
 
-    if _PinyinStyle is None:
-        return forms
+    forms.update(_build_phonetic_forms(normalized))
 
-    representations = (
-        ("pinyin_tone", _PinyinStyle.TONE3),
-        ("pinyin", _PinyinStyle.NORMAL),
-        ("zhuyin_tone", _PinyinStyle.BOPOMOFO),
-    )
-    for name, style in representations:
-        value = _phoneticize_cjk(normalized, style)
-        if not value:
-            continue
-        forms[name] = value
-        forms[f"{name}_compact"] = _compact_matching_text(value)
-        if name == "zhuyin_tone":
-            loose = _strip_phonetic_tones(value)
-            forms["zhuyin"] = loose
-            forms["zhuyin_compact"] = _compact_matching_text(loose)
-        elif name == "pinyin_tone":
-            # TONE3 uses trailing digits, which is convenient for exact and
-            # tone-insensitive matching without Unicode combining marks.
-            loose = _strip_phonetic_tones(value)
-            forms["pinyin_loose"] = loose
-            forms["pinyin_loose_compact"] = _compact_matching_text(loose)
+    skeleton, has_interleave, _ = _extract_cjk_skeleton(normalized)
+    if has_interleave:
+        forms.update(_build_cjk_skeleton_forms(skeleton))
     return forms
 
 
@@ -2044,6 +2105,81 @@ def _contains_phonetic_form(
     )
 
 
+def _is_strong_literal(literal: str) -> bool:
+    return any(
+        literal in phrases
+        for phrases in (*SPAM_STRONG_PHRASES.values(), *SPAM_STRONG_INTENT_PHRASES.values())
+    )
+
+
+def _is_ambiguous_match(match: dict[str, str]) -> bool:
+    return match.get("confidence") in {"ambiguous_phonetic", "ambiguous_skeleton"}
+
+
+def _find_cjk_skeleton_match(
+    message_forms: dict[str, str],
+    literal: str,
+) -> Optional[dict[str, str]]:
+    """Match a Chinese literal against an obfuscated CJK-only message form."""
+    if not message_forms.get("cjk_skeleton"):
+        return None
+
+    normalized_literal = normalize_message_text(literal)
+    compact_literal = _compact_matching_text(normalized_literal)
+    if not compact_literal or not all(_is_cjk_character(character) for character in compact_literal):
+        # English, numeric, URL, and mixed rules must stay on their existing
+        # channels so the skeleton cannot change their matching behavior.
+        return None
+
+    target_forms = _build_cjk_skeleton_forms(compact_literal)
+    channels = (
+        "cjk_skeleton", "cjk_skeleton_compact",
+        "cjk_skeleton_pinyin_tone", "cjk_skeleton_pinyin_tone_compact",
+        "cjk_skeleton_pinyin", "cjk_skeleton_pinyin_compact",
+        "cjk_skeleton_pinyin_loose", "cjk_skeleton_pinyin_loose_compact",
+        "cjk_skeleton_zhuyin_tone", "cjk_skeleton_zhuyin_tone_compact",
+        "cjk_skeleton_zhuyin", "cjk_skeleton_zhuyin_compact",
+    )
+    strong = _is_strong_literal(compact_literal)
+    for channel in channels:
+        target = target_forms.get(channel, "")
+        message = message_forms.get(channel, "")
+        if not target or not message:
+            continue
+        if "pinyin" in channel:
+            representation = "pinyin"
+            matched = _contains_phonetic_form(
+                message,
+                target,
+                representation,
+                compact=channel.endswith("_compact"),
+            )
+        elif "zhuyin" in channel:
+            representation = "zhuyin"
+            matched = _contains_phonetic_form(
+                message,
+                target,
+                representation,
+                compact=channel.endswith("_compact"),
+            )
+        else:
+            representation = "text"
+            matched = target in message
+        if not matched:
+            continue
+
+        if representation == "text":
+            confidence = "skeleton" if strong else "ambiguous_skeleton"
+        else:
+            confidence = representation if strong else "ambiguous_phonetic"
+        return {
+            "literal": compact_literal,
+            "channel": channel,
+            "confidence": confidence,
+        }
+    return None
+
+
 def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional[dict[str, str]]:
     if not literal or not _meaningful_literal(literal):
         return None
@@ -2090,15 +2226,14 @@ def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional
                 representation != "text"
                 and all(_is_cjk_character(character) for character in compact_literal)
                 and len(compact_literal) == 2
-                and not any(literal in phrases for phrases in SPAM_STRONG_PHRASES.values())
-                and not any(literal in phrases for phrases in SPAM_STRONG_INTENT_PHRASES.values())
+                and not _is_strong_literal(literal)
             )
             return {
                 "literal": literal,
                 "channel": representation,
                 "confidence": "ambiguous_phonetic" if ambiguous_phonetic else representation,
             }
-    return None
+    return _find_cjk_skeleton_match(message_forms, literal)
 
 
 def _simple_pattern_literal(pattern: str) -> Optional[str]:
@@ -2149,6 +2284,14 @@ def _find_pattern_match(message_forms: dict[str, str], pattern: str) -> Optional
                 return {"pattern": pattern, "channel": representation}
         except re.error:
             continue
+    if any(_is_cjk_character(character) for character in normalized_pattern):
+        skeleton = message_forms.get("cjk_skeleton", "")
+        if skeleton:
+            try:
+                if re.search(normalized_pattern, skeleton, re.IGNORECASE):
+                    return {"pattern": pattern, "channel": "cjk_skeleton"}
+            except re.error:
+                pass
     return None
 
 
@@ -2158,6 +2301,9 @@ def _obfuscation_signals(original: str, normalized: str) -> list[str]:
         signals.append("zero_width_character")
     if _CJK_SEPARATOR_RE.search(original):
         signals.append("separators_inside_chinese")
+    _, _, has_alphanumeric_interleave = _extract_cjk_skeleton(normalized)
+    if has_alphanumeric_interleave:
+        signals.append("alphanumeric_between_chinese")
     if _leet_matching_variant(normalized) != normalized:
         signals.append("letter_digit_substitution")
     if re.search(r"(?:[!?！？。．]){3,}", original):
@@ -2207,7 +2353,7 @@ def analyze_spam(
             continue
         evidence_matches = [
             match for match in category_matches
-            if match.get("confidence") != "ambiguous_phonetic" or not has_cjk_input
+            if not _is_ambiguous_match(match) or not has_cjk_input
         ]
         if not evidence_matches:
             continue
@@ -2217,7 +2363,7 @@ def analyze_spam(
             match["literal"] in SPAM_STRONG_PHRASES.get(category, set())
             for match in evidence_matches
         )
-        if all(match.get("confidence") == "ambiguous_phonetic" for match in evidence_matches):
+        if all(_is_ambiguous_match(match) for match in evidence_matches):
             # Two-character homophones are too ambiguous when the original
             # message is still Chinese (e.g. 文件 vs 穩健). They remain useful
             # for pinyin-only input, where there is no original script to use.
@@ -2242,13 +2388,13 @@ def analyze_spam(
             continue
         evidence_matches = [
             match for match in intent_matches
-            if match.get("confidence") != "ambiguous_phonetic" or not has_cjk_input
+            if not _is_ambiguous_match(match) or not has_cjk_input
         ]
         if not evidence_matches:
             continue
         intents.append(intent)
         matched_rules.extend({"group": intent, **match} for match in evidence_matches)
-        if all(match.get("confidence") == "ambiguous_phonetic" for match in evidence_matches):
+        if all(_is_ambiguous_match(match) for match in evidence_matches):
             if not has_cjk_input:
                 score += 1
         else:

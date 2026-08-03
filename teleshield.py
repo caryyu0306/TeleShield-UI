@@ -920,37 +920,47 @@ def ensure_account_registry(root: Optional[Path] = None) -> list:
 # ``出`` or ``彩``) must never be enough to block a private conversation.
 SPAM_CATEGORY_PHRASES = {
     "investment": (
-        "投資", "理財", "帶單", "跟單", "量化", "穩賺", "穩健", "高回報", "高收益",
-        "投資群組", "投資老師", "投資顧問", "投資平台", "財富自由",
+        "投資", "理財", "股票", "外匯", "期貨", "配資", "融資", "帶單", "跟單",
+        "喊單", "量化", "抄底", "短線", "保本", "翻倍", "收益", "利潤", "高回報",
+        "高收益", "穩賺", "穩健", "零風險", "高勝率", "投資群組", "投資老師",
+        "投資顧問", "投資平台", "財富自由", "財務自由", "帶你賺",
     ),
     "work": (
-        "兼職", "刷單", "日入", "月入", "躺賺", "被動收入", "在家工作", "輕鬆賺",
-        "網路賺錢", "打字賺錢", "家庭代工",
+        "兼職", "招聘", "招募", "招工", "高薪", "日結", "刷單", "日入", "月入", "躺賺",
+        "被動收入", "在家工作", "輕鬆賺", "網路賺錢", "打字", "打字賺錢", "家庭代工",
     ),
     "adult": (
-        "色情", "A片", "成人", "裸聊", "約炮", "援交", "包養", "成人影片",
-        "真人裸聊", "情色聊天",
+        "色情", "A片", "AV", "成人", "裸聊", "裸照", "私密照", "約炮", "援交", "包養",
+        "成人影片", "成人直播", "色情直播", "真人裸聊", "情色", "情色聊天", "露骨",
     ),
     "gambling": (
         "賭博", "博彩", "線上博弈", "網路博弈", "線上賭博", "網路賭博", "娛樂城",
         "歡樂城", "賭場", "推筒子", "百家樂", "骰寶", "老虎機", "角子機", "拉霸",
-        "球版", "現金版", "真人荷官", "真人娛樂", "下注", "投注", "賭金", "彩金",
-        "返水", "洗碼", "賠率", "高賠率", "保證贏",
+        "球版", "現金版", "彩票", "六合彩", "賭盤", "牌九", "德州撲克", "真人荷官",
+        "真人娛樂", "下注", "押注", "投注", "賭金", "彩金", "贏錢", "返水", "洗碼",
+        "賠率", "高賠率", "保證贏",
+    ),
+    "fraud": (
+        "詐騙", "诈骗", "假客服", "官方客服", "冒充", "帳戶異常", "账户异常", "帳戶驗證",
+        "账户验证", "安全驗證", "安全验证", "驗證碼", "验证码", "解除限制", "解凍帳戶",
+        "解冻账户", "退款", "退費", "中獎", "中奖", "領獎", "领奖", "獎金", "奖金",
+        "紅利", "红利", "貸款", "贷款", "借款", "低息貸款", "代辦", "保單",
     ),
     "promotion": (
-        "註冊送", "免費領", "紅包", "禮金", "優惠碼", "推廣碼", "點贊", "關注",
-        "刷粉", "刷讚", "漲粉", "免費加群",
+        "註冊送", "免費", "免費領", "紅包", "禮金", "優惠", "折扣", "優惠碼", "推廣碼",
+        "限時", "限量", "最後名額", "點贊", "關注", "刷粉", "刷讚", "漲粉", "免費加群",
     ),
     "sales": (
-        "供應", "批發", "代購", "代發", "批發價", "大量現貨", "一件代發",
+        "供應", "批發", "代購", "代發", "批發價", "大量現貨", "一件代發", "招商加盟",
+        "加盟", "代理",
     ),
     "crypto": (
-        "免費加密貨幣", "免費比特幣", "空投", "虛擬貨幣", "加密貨幣",
-        "free crypto", "free bitcoin", "airdrop",
+        "免費加密貨幣", "免費比特幣", "比特幣", "以太幣", "空投", "挖礦", "幣圈",
+        "虛擬貨幣", "加密貨幣", "錢包", "USDT", "NFT", "free crypto", "free bitcoin", "airdrop",
     ),
     "advertisement": (
-        "廣告", "推廣", "促銷", "招商", "sponsor", "promote", "promotion",
-        "advertisement", "giveaway", "limited offer", "buy now",
+        "廣告", "推廣", "促銷", "招商", "限時優惠", "限時活動", "品牌合作", "sponsor",
+        "promote", "promotion", "advertisement", "giveaway", "limited offer", "buy now",
     ),
 }
 
@@ -977,49 +987,92 @@ SPAM_CATEGORY_PATTERNS = {
         r"(?:註冊|注册)\s*(?:送|送彩金|送紅包|送红包)",
         r"(?:discount\s*\d{2,}%|limited\s*offer|giveaway|free\s*(?:crypto|bitcoin))",
     ),
+    "payment": (
+        r"(?:付款|支付|轉帳|转账|匯款|汇款|充值|提現|提现|入金|出金|打款|收款)",
+    ),
 }
 
 SPAM_INTENT_PHRASES = {
     "contact": (
-        "加 LINE", "加微信", "加好友", "加 Telegram", "加 WhatsApp", "私訊我", "私信我",
-        "聯絡我", "联系我", "進群", "进群",
+        "加 LINE", "加LINE", "加微信", "加好友", "加 Telegram", "加Telegram", "加 WhatsApp",
+        "加WhatsApp", "添加微信", "添加 LINE", "加我微信", "加我LINE", "加 V", "加V",
+        "加 VX", "加VX", "私訊我", "私信我", "聯絡我", "联系我", "聯絡微信", "联系微信",
+        "進群", "进群", "入群", "入群連結", "入群链接", "掃碼", "扫码",
     ),
     "guarantee": (
-        "保證獲利", "保证获利", "穩賺", "稳赚", "高回報", "高回报", "高收益",
+        "保證獲利", "保证获利", "保證賺", "保证赚", "保證贏", "保证赢", "穩賺", "稳赚",
+        "高回報", "高回报", "高收益", "高利潤", "高利润", "本金保障", "本金保證", "本金保证",
+        "零風險", "零风险", "帶你賺", "带你赚",
     ),
     "cta": (
-        "立即加入", "立即註冊", "立即注册", "立即私訊", "立即私信", "點擊連結", "点击链接",
-        "加入群組", "加入群组", "立即下注", "立即投注",
+        "立即加入", "馬上加入", "马上加入", "現在加入", "现在加入", "趕快加入", "赶快加入",
+        "立即註冊", "立即注册", "馬上註冊", "马上注册", "立即私訊", "立即私信", "立即聯絡",
+        "立即联系", "立即加我", "點擊連結", "点击链接", "加入群組", "加入群组", "立即下注",
+        "立即投注", "立即購買", "立即购买", "立即領取", "立即领取",
     ),
     "offer": (
-        "免費領", "免费领", "免費領取", "免费领取", "註冊送", "注册送", "紅包優惠", "红包优惠",
-        "優惠碼", "优惠码",
+        "免費領", "免费领", "免費領取", "免费领取", "免費紅包", "免费红包", "免費禮金", "免费礼金",
+        "註冊送", "注册送", "紅包優惠", "红包优惠", "優惠碼", "优惠码", "限時優惠", "限时优惠",
+    ),
+    "payment": (
+        "付款", "支付", "轉帳", "转账", "匯款", "汇款", "充值", "提現", "提现", "入金", "出金",
+        "打款", "收款", "掃碼付款", "扫码付款",
     ),
 }
 
 SPAM_STRONG_INTENT_PHRASES = {
     "contact": {
-        "加 LINE", "加微信", "加 Telegram", "加 WhatsApp", "私訊我", "私信我", "進群", "进群",
+        "加 LINE", "加LINE", "加微信", "加 Telegram", "加Telegram", "加 WhatsApp", "加WhatsApp",
+        "添加微信", "加我微信", "加我LINE", "私訊我", "私信我", "進群", "进群", "入群",
     },
     "guarantee": {
-        "保證獲利", "保证获利", "穩賺", "稳赚", "保證贏", "保证赢",
+        "保證獲利", "保证获利", "保證賺", "保证赚", "穩賺", "稳赚", "保證贏", "保证赢",
+        "零風險", "零风险", "帶你賺", "带你赚",
     },
     "cta": {
-        "立即加入", "立即註冊", "立即注册", "點擊連結", "点击链接", "立即下注", "立即投注",
+        "立即加入", "馬上加入", "马上加入", "現在加入", "现在加入", "立即註冊", "立即注册",
+        "立即私訊", "立即私信", "點擊連結", "点击链接", "立即下注", "立即投注", "立即購買",
+        "立即购买",
     },
     "offer": {
-        "免費領", "免费领", "免費領取", "免费领取", "註冊送", "注册送", "紅包優惠", "红包优惠",
-        "優惠碼", "优惠码",
+        "免費領", "免费领", "免費領取", "免费领取", "免費紅包", "免费红包", "註冊送", "注册送",
+        "紅包優惠", "红包优惠", "優惠碼", "优惠码", "限時優惠", "限时优惠",
+    },
+    "payment": {
+        "付款", "支付", "轉帳", "转账", "匯款", "汇款", "充值", "提現", "提现", "打款",
+        "掃碼付款", "扫码付款",
     },
 }
 
 # Strong phrases can justify blocking even without a separate call to action.
 # They are deliberately phrase-level, unlike the old single-character rules.
 SPAM_STRONG_PHRASES = {
-    "investment": {"投資群組", "投資老師", "投資顧問", "投資平台", "財富自由"},
-    "adult": {"A片", "裸聊", "約炮", "援交", "包養", "成人影片", "真人裸聊", "情色聊天"},
-    "gambling": {"賭博", "博彩", "線上博弈", "網路博弈", "娛樂城", "賭場", "真人荷官", "老虎機", "百家樂"},
-    "crypto": {"免費比特幣", "免費加密貨幣", "free crypto", "free bitcoin", "airdrop"},
+    # High-risk category terms are strong enough to block a non-contact's
+    # first message even when the match only comes from a homophone form.
+    "investment": {
+        "投資", "帶單", "跟單", "高回報", "高收益", "穩賺", "投資群組", "投資老師",
+        "投資顧問", "投資平台", "財富自由", "財務自由", "帶你賺",
+    },
+    "work": {"兼職", "刷單", "日入", "月入", "躺賺", "被動收入", "家庭代工"},
+    "adult": {
+        "色情", "A片", "AV", "成人", "裸聊", "裸照", "私密照", "約炮", "援交", "包養",
+        "成人影片", "成人直播", "色情直播", "真人裸聊", "情色", "情色聊天", "露骨",
+    },
+    "gambling": {
+        "賭博", "博彩", "線上博弈", "網路博弈", "線上賭博", "網路賭博", "娛樂城", "賭場",
+        "百家樂", "老虎機", "彩票", "六合彩", "賭盤", "真人荷官", "下注", "押注", "投注",
+        "賭金", "彩金", "返水", "洗碼", "高賠率", "保證贏",
+    },
+    "fraud": {
+        "詐騙", "诈骗", "假客服", "官方客服", "帳戶異常", "账户异常", "帳戶驗證", "账户验证",
+        "安全驗證", "安全验证", "驗證碼", "验证码", "解除限制", "解凍帳戶", "解冻账户",
+        "中獎", "中奖", "領獎", "领奖", "低息貸款", "低息贷款",
+    },
+    "promotion": {"免費加群", "免費紅包", "免费红包", "註冊送", "注册送", "限時優惠", "限时优惠"},
+    "crypto": {
+        "免費比特幣", "免費加密貨幣", "比特幣", "以太幣", "空投", "挖礦", "幣圈", "加密貨幣",
+        "虛擬貨幣", "USDT", "NFT", "free crypto", "free bitcoin", "airdrop",
+    },
 }
 
 # Kept as a compatibility surface for callers that import the old constant.
@@ -1794,6 +1847,11 @@ def get_ocr_status() -> dict:
 _ZERO_WIDTH_RE = re.compile(r"[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060\u2061\u2066-\u2069\ufeff]")
 _VARIATION_SELECTOR_RE = re.compile(r"[\ufe00-\ufe0f\U000e0100-\U000e01ef]")
 _PHONETIC_TONE_RE = re.compile(r"[1-5ˊˇˋ˙]")
+_PINYIN_SYLLABLE_RE = re.compile(r"[a-z]+[1-5]?", re.IGNORECASE)
+_ZHUYIN_SYLLABLE_RE = re.compile(
+    r"(?:[\u3105-\u312f]+[ˊˇˋ˙]?|[a-z]+[0-9]*|[0-9]+)",
+    re.IGNORECASE,
+)
 _CJK_SEPARATOR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff][\s\-_~*·•/\\]+[\u3400-\u4dbf\u4e00-\u9fff]")
 _LEET_TRANSLATION = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b"})
 
@@ -1802,6 +1860,7 @@ _CATEGORY_WEIGHTS = {
     "work": 2,
     "adult": 3,
     "gambling": 3,
+    "fraud": 3,
     "promotion": 2,
     "sales": 2,
     "crypto": 3,
@@ -1813,6 +1872,7 @@ _INTENT_WEIGHTS = {
     "guarantee": 2,
     "cta": 2,
     "offer": 2,
+    "payment": 2,
 }
 
 SPAM_BLOCK_SCORE = 4
@@ -1943,8 +2003,45 @@ def _meaningful_literal(value: str) -> bool:
     if not compact:
         return False
     if any(_is_cjk_character(character) for character in compact):
-        return len(compact) >= 2
-    return len(compact) >= 3
+        # Explicit learned rules may intentionally contain one high-signal
+        # Chinese character. Built-in rules still control which such entries
+        # are present, so common characters are not made global block rules.
+        return len(compact) >= 1
+    return len(compact) >= 2
+
+
+def _phonetic_tokens(value: str, representation: str) -> list[str]:
+    if representation == "pinyin":
+        return [token.casefold() for token in _PINYIN_SYLLABLE_RE.findall(value)]
+    return [token.casefold() for token in _ZHUYIN_SYLLABLE_RE.findall(value)]
+
+
+def _contains_phonetic_form(
+    message: str,
+    target: str,
+    representation: str,
+    compact: bool,
+) -> bool:
+    """Match complete phonetic syllables, avoiding suffix collisions.
+
+    A raw substring comparison would treat ``A片`` (a pian) as present in
+    ``詐騙`` (zha pian), because ``a`` is the suffix of the first syllable.
+    Generated pinyin and Zhuyin forms contain syllable separators, so compare
+    token sequences for those channels. Compact phonetic forms are only used
+    for an exact whole-message match; this keeps no-space pinyin useful without
+    reintroducing partial-syllable false positives.
+    """
+    if compact:
+        return message == target
+    target_tokens = _phonetic_tokens(target, representation)
+    message_tokens = _phonetic_tokens(message, representation)
+    if not target_tokens or len(target_tokens) > len(message_tokens):
+        return False
+    width = len(target_tokens)
+    return any(
+        message_tokens[index:index + width] == target_tokens
+        for index in range(len(message_tokens) - width + 1)
+    )
 
 
 def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional[dict[str, str]]:
@@ -1960,7 +2057,28 @@ def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional
     for channel in channels:
         target = target_forms.get(channel, "")
         message = message_forms.get(channel, "")
-        if target and message and target in message:
+        if not target or not message:
+            continue
+        if channel.startswith("zhuyin"):
+            representation = "zhuyin"
+            matched = _contains_phonetic_form(
+                message,
+                target,
+                representation,
+                compact=channel.endswith("_compact"),
+            )
+        elif channel.startswith("pinyin"):
+            representation = "pinyin"
+            matched = _contains_phonetic_form(
+                message,
+                target,
+                representation,
+                compact=channel.endswith("_compact"),
+            )
+        else:
+            representation = "text"
+            matched = target in message
+        if matched:
             if channel.startswith("zhuyin"):
                 representation = "zhuyin"
             elif channel.startswith("pinyin"):
@@ -1973,6 +2091,7 @@ def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional
                 and all(_is_cjk_character(character) for character in compact_literal)
                 and len(compact_literal) == 2
                 and not any(literal in phrases for phrases in SPAM_STRONG_PHRASES.values())
+                and not any(literal in phrases for phrases in SPAM_STRONG_INTENT_PHRASES.values())
             )
             return {
                 "literal": literal,
@@ -1982,17 +2101,52 @@ def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional
     return None
 
 
+def _simple_pattern_literal(pattern: str) -> Optional[str]:
+    """Return a pattern's literal value when it contains no regex operators."""
+    normalized = normalize_message_text(pattern)
+    if not normalized:
+        return None
+    try:
+        return normalized if re.escape(normalized) == normalized else None
+    except re.error:
+        return None
+
+
 def _find_pattern_match(message_forms: dict[str, str], pattern: str) -> Optional[dict[str, str]]:
     if not pattern:
         return None
     normalized_pattern = normalize_message_text(pattern)
-    for channel in ("text", "text_compact", "leet", "leet_compact"):
+
+    # Learned patterns generated from a Chinese sample are escaped literals.
+    # Send them through the same phonetic matcher as learned keywords so a
+    # learned ``投資`` pattern also recognizes ``頭資`` / pinyin / Zhuyin.
+    literal = _simple_pattern_literal(normalized_pattern)
+    if literal:
+        literal_match = _find_literal_match(message_forms, literal)
+        if literal_match:
+            return {"pattern": pattern, **literal_match}
+
+    channels = (
+        "text", "text_compact", "leet", "leet_compact",
+        "pinyin_tone", "pinyin_tone_compact", "pinyin", "pinyin_compact",
+        "pinyin_loose", "pinyin_loose_compact",
+        "zhuyin_tone", "zhuyin_tone_compact", "zhuyin", "zhuyin_compact",
+    )
+    for channel in channels:
         message = message_forms.get(channel, "")
         if not message:
             continue
         try:
             if re.search(normalized_pattern, message, re.IGNORECASE):
-                return {"pattern": pattern, "channel": "text" if channel.startswith("text") else "leet"}
+                if channel.startswith("zhuyin"):
+                    representation = "zhuyin"
+                elif channel.startswith("pinyin"):
+                    representation = "pinyin"
+                elif channel.startswith("leet"):
+                    representation = "leet"
+                else:
+                    representation = "text"
+                return {"pattern": pattern, "channel": representation}
         except re.error:
             continue
     return None
@@ -2289,6 +2443,42 @@ async def check_photo(client, msg) -> str:
                 os.unlink(tmp)
             except OSError:
                 pass
+
+
+async def analyze_message_content(
+    client,
+    message,
+    cfg: Optional[dict] = None,
+    account_id: Optional[str] = None,
+    sender_context: Optional[dict] = None,
+) -> dict:
+    """Analyze text and OCR through exactly the same spam decision pipeline."""
+    text = str(getattr(message, "text", "") or "")
+    decision = analyze_spam(
+        text,
+        cfg,
+        account_id=account_id,
+        sender_context=sender_context,
+    )
+    if decision["should_block"] or not getattr(message, "photo", None):
+        return {"text": text, "decision": decision, "source": "text"}
+
+    ocr_text = await check_photo(client, message)
+    if not ocr_text:
+        return {"text": text, "decision": decision, "source": "text"}
+    ocr_decision = analyze_spam(
+        ocr_text,
+        cfg,
+        account_id=account_id,
+        sender_context=sender_context,
+    )
+    if not ocr_decision["should_block"]:
+        return {"text": text, "decision": decision, "source": "text"}
+    return {
+        "text": f"[OCR] {ocr_text[:100]}",
+        "decision": ocr_decision,
+        "source": "ocr",
+    }
 
 # ──────────── Telegram authentication ────────────
 
@@ -2650,8 +2840,9 @@ async def _scan_history(
                         continue
                     reason = message.text or ""
                     if not strict_mode:
-                        decision = analyze_spam(
-                            reason,
+                        content_decision = await analyze_message_content(
+                            client,
+                            message,
                             cfg,
                             account_id=scan_account_id,
                             sender_context={
@@ -2659,21 +2850,8 @@ async def _scan_history(
                                 "telegram_fake": bool(getattr(entity, "fake", False)),
                             },
                         )
-                        if not decision["should_block"] and message.photo:
-                            ocr_text = await check_photo(client, message)
-                            if ocr_text:
-                                ocr_decision = analyze_spam(
-                                    ocr_text,
-                                    cfg,
-                                    account_id=scan_account_id,
-                                    sender_context={
-                                        "telegram_scam": bool(getattr(entity, "scam", False)),
-                                        "telegram_fake": bool(getattr(entity, "fake", False)),
-                                    },
-                                )
-                                if ocr_decision["should_block"]:
-                                    reason = f"[OCR] {ocr_text[:100]}"
-                                    decision = ocr_decision
+                        reason = content_decision["text"]
+                        decision = content_decision["decision"]
                         if not reason or not decision["should_block"]:
                             continue
 
@@ -2842,25 +3020,16 @@ async def _listen(stop_event: Optional[asyncio.Event] = None, ready_callback=Non
                     "telegram_scam": bool(getattr(sender, "scam", False)),
                     "telegram_fake": bool(getattr(sender, "fake", False)),
                 }
-                decision = analyze_spam(
-                    spam_text,
+                content_decision = await analyze_message_content(
+                    client,
+                    msg,
                     cfg,
                     account_id=store.account_id,
                     sender_context=sender_context,
                 )
-                if not decision["should_block"] and msg.photo:
-                    ocr_text = await check_photo(client, msg)
-                    if ocr_text:
-                        ocr_decision = analyze_spam(
-                            ocr_text,
-                            cfg,
-                            account_id=store.account_id,
-                            sender_context=sender_context,
-                        )
-                        if ocr_decision["should_block"]:
-                            ocr_found_spam = True
-                            spam_text = ocr_text[:100]
-                            decision = ocr_decision
+                spam_text = content_decision["text"]
+                decision = content_decision["decision"]
+                ocr_found_spam = content_decision["source"] == "ocr"
 
                 if not decision["should_block"]:
                     return

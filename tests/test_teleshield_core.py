@@ -836,6 +836,9 @@ def test_common_chinese_text_does_not_match_single_character_spam_rules(ordinary
     [
         "投資群組",
         "偷資群組",
+        "頭姿",
+        "頭茲",
+        "頭資",
         "投 資 群 組",
         "投\u200b資群組",
         "tou zi qun zu",
@@ -857,6 +860,40 @@ def test_first_message_without_url_uses_content_and_sender_signals():
     assert decision["should_block"] is True
     assert decision["score"] >= decision["threshold"]
     assert {"guarantee", "contact"}.issubset(decision["intents"])
+
+
+@pytest.mark.parametrize(
+    "canonical",
+    [
+        "投資",
+        "賭博",
+        "色情",
+        "詐騙",
+        "兼職",
+        "比特幣",
+        "加微信",
+        "立即加入",
+        "保證獲利",
+        "付款",
+        "轉帳",
+    ],
+)
+def test_default_high_risk_rules_match_pinyin_and_zhuyin(canonical):
+    forms = teleshield.build_message_forms(canonical)
+
+    pinyin_decision = teleshield.analyze_spam(forms["pinyin"])
+    zhuyin_decision = teleshield.analyze_spam(forms["zhuyin"])
+
+    assert pinyin_decision["should_block"] is True
+    assert zhuyin_decision["should_block"] is True
+
+
+def test_phonetic_matching_does_not_create_partial_syllable_category_hits():
+    decision = teleshield.analyze_spam("詐騙")
+
+    assert decision["should_block"] is True
+    assert decision["categories"] == ["fraud"]
+    assert "adult" not in decision["categories"]
 
 
 def test_message_forms_keep_tones_and_tone_less_phonetic_channels():
@@ -883,6 +920,12 @@ def test_learned_keyword_uses_the_same_phonetic_forms(monkeypatch, tmp_path):
     assert teleshield.is_spam("ㄊㄡˊ ㄗ ㄑㄩㄣˊ ㄗㄨˇ", cfg) is True
 
 
+def test_learned_single_character_rule_is_not_dropped():
+    cfg = {"learned_patterns": {"keywords": ["賭"], "patterns": []}}
+
+    assert teleshield.is_spam("賭", cfg) is True
+
+
 def test_user_learned_keyword_generates_runtime_homophone_match(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     teleshield.save_config({"learned_patterns": {"keywords": [], "patterns": []}})
@@ -891,6 +934,45 @@ def test_user_learned_keyword_generates_runtime_homophone_match(monkeypatch, tmp
 
     assert "藍星財富" in result["added_keywords"]
     assert teleshield.is_spam("蘭星財富", teleshield.load_config()) is True
+
+
+def test_user_learned_literal_pattern_uses_phonetic_forms():
+    cfg = {
+        "learned_patterns": {
+            "keywords": [],
+            "patterns": [r"藍星財富"],
+        }
+    }
+
+    decision = teleshield.analyze_spam("蘭星財富", cfg)
+
+    assert decision["should_block"] is True
+    assert decision["learned_matches"][0]["channel"] == "pinyin"
+
+
+def test_ocr_content_uses_the_same_homophone_pipeline(monkeypatch):
+    message = SimpleNamespace(text="", photo=True)
+
+    async def fake_check_photo(client, msg):
+        assert msg is message
+        return "頭姿\n頭茲\n頭資"
+
+    monkeypatch.setattr(teleshield, "check_photo", fake_check_photo)
+    result = asyncio.run(
+        teleshield.analyze_message_content(
+            object(),
+            message,
+            sender_context={"new_sender": True},
+        )
+    )
+
+    assert result["source"] == "ocr"
+    assert result["text"] == "[OCR] 頭姿\n頭茲\n頭資"
+    assert result["decision"]["should_block"] is True
+    assert any(
+        rule.get("channel") == "pinyin"
+        for rule in result["decision"]["matched_rules"]
+    )
 
 
 @pytest.mark.parametrize(

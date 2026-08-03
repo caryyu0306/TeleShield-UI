@@ -263,6 +263,11 @@ private struct ProtectionSummary: View {
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(.primary)
                     if let userID = account.userID { Text("Telegram ID：\(userID)").font(.caption).foregroundStyle(.tertiary) }
+                    if client.selectedAccountID == account.id {
+                        Text("陌生人防護：\(client.moderationPolicy.protectionMode.title)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 Button {
@@ -933,8 +938,10 @@ private struct AccountDetailsSettingsView: View {
     @State private var telegramNotification = TelegramNotificationPolicy.defaults
     @State private var scanSettings = ScanSettings.defaults
     @State private var pendingEnablePolicy: ModerationPolicy?
+    @State private var pendingProtectionMode: ProtectionMode?
     @State private var pendingScope: PrivateHistoryDeletionScope?
     @State private var showEnableConfirmation = false
+    @State private var showProtectionModeConfirmation = false
     @State private var showBothScopeConfirmation = false
     @State private var showLogoutConfirmation = false
     @State private var showClearConfirmation = false
@@ -970,20 +977,46 @@ private struct AccountDetailsSettingsView: View {
                 }
 
                 Section("防護政策") {
+                    Picker(
+                        "陌生人防護模式",
+                        selection: Binding(
+                            get: { policy.protectionMode },
+                            set: { mode in
+                                guard mode != policy.protectionMode else { return }
+                                if mode == .strict {
+                                    pendingProtectionMode = mode
+                                    showProtectionModeConfirmation = true
+                                } else {
+                                    persistPolicy(policyWith(protectionMode: mode))
+                                }
+                            }
+                        )
+                    ) {
+                        ForEach(ProtectionMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+
+                    Text(policy.protectionMode.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Toggle(
                         "封鎖後自動刪除一對一私訊",
                         isOn: Binding(
                             get: { policy.deletePrivateHistoryAfterBlock },
                             set: { enabled in
                                 if enabled {
-                                    pendingEnablePolicy = ModerationPolicy(
+                                    pendingEnablePolicy = policyWith(
+                                        protectionMode: policy.protectionMode,
                                         deletePrivateHistoryAfterBlock: true,
                                         deletePrivateHistoryScope: policy.deletePrivateHistoryScope,
                                         telegramNotification: policy.telegramNotification
                                     )
                                     showEnableConfirmation = true
                                 } else {
-                                    persistPolicy(ModerationPolicy(
+                                    persistPolicy(policyWith(
+                                        protectionMode: policy.protectionMode,
                                         deletePrivateHistoryAfterBlock: false,
                                         deletePrivateHistoryScope: policy.deletePrivateHistoryScope,
                                         telegramNotification: policy.telegramNotification
@@ -1003,7 +1036,8 @@ private struct AccountDetailsSettingsView: View {
                                     pendingScope = scope
                                     showBothScopeConfirmation = true
                                 } else {
-                                    persistPolicy(ModerationPolicy(
+                                    persistPolicy(policyWith(
+                                        protectionMode: policy.protectionMode,
                                         deletePrivateHistoryAfterBlock: policy.deletePrivateHistoryAfterBlock,
                                         deletePrivateHistoryScope: scope,
                                         telegramNotification: policy.telegramNotification
@@ -1142,10 +1176,22 @@ private struct AccountDetailsSettingsView: View {
         } message: {
             Text("只會對之後成功封鎖的一對一私訊生效；試運行不會刪除。")
         }
+        .confirmationDialog("啟用嚴格模式？", isPresented: $showProtectionModeConfirmation, titleVisibility: .visible) {
+            Button("確認啟用", role: .destructive) {
+                if let pendingProtectionMode {
+                    persistPolicy(policyWith(protectionMode: pendingProtectionMode))
+                }
+                pendingProtectionMode = nil
+            }
+            Button("取消", role: .cancel) { pendingProtectionMode = nil }
+        } message: {
+            Text("啟用後，所有非聯絡人的私訊都會直接封鎖，只有聯絡人與白名單可以傳訊息。這可能封鎖正常的新對話。")
+        }
         .confirmationDialog("確認嘗試從雙方刪除？", isPresented: $showBothScopeConfirmation, titleVisibility: .visible) {
             Button("確認使用雙方刪除", role: .destructive) {
                 if let pendingScope {
-                    persistPolicy(ModerationPolicy(
+                    persistPolicy(policyWith(
+                        protectionMode: policy.protectionMode,
                         deletePrivateHistoryAfterBlock: policy.deletePrivateHistoryAfterBlock,
                         deletePrivateHistoryScope: pendingScope,
                         telegramNotification: policy.telegramNotification
@@ -1174,14 +1220,29 @@ private struct AccountDetailsSettingsView: View {
     private func persistPolicy(_ nextPolicy: ModerationPolicy) {
         policy = nextPolicy
         Task {
-            await client.updateModerationPolicy(nextPolicy, accountID: accountID)
+            _ = await client.updateModerationPolicy(nextPolicy, accountID: accountID)
             await client.refreshAccountData(accountID: accountID)
             if client.selectedAccountID == accountID { policy = client.moderationPolicy }
         }
     }
 
+    private func policyWith(
+        protectionMode: ProtectionMode? = nil,
+        deletePrivateHistoryAfterBlock: Bool? = nil,
+        deletePrivateHistoryScope: PrivateHistoryDeletionScope? = nil,
+        telegramNotification: TelegramNotificationPolicy? = nil
+    ) -> ModerationPolicy {
+        ModerationPolicy(
+            protectionMode: protectionMode ?? policy.protectionMode,
+            deletePrivateHistoryAfterBlock: deletePrivateHistoryAfterBlock ?? policy.deletePrivateHistoryAfterBlock,
+            deletePrivateHistoryScope: deletePrivateHistoryScope ?? policy.deletePrivateHistoryScope,
+            telegramNotification: telegramNotification ?? policy.telegramNotification
+        )
+    }
+
     private func persistTelegramNotification() {
-        let nextPolicy = ModerationPolicy(
+        let nextPolicy = policyWith(
+            protectionMode: policy.protectionMode,
             deletePrivateHistoryAfterBlock: policy.deletePrivateHistoryAfterBlock,
             deletePrivateHistoryScope: policy.deletePrivateHistoryScope,
             telegramNotification: telegramNotification

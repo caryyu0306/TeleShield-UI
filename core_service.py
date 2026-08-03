@@ -480,6 +480,7 @@ class CoreService:
             get_policy(account_id=account_id)
             if callable(get_policy)
             else {
+                "protection_mode": "normal",
                 "delete_private_history_after_block": False,
                 "delete_private_history_scope": "self",
                 "telegram_notification": {
@@ -922,6 +923,7 @@ class CoreService:
         get_policy = getattr(self.core, "get_moderation_policy", None)
         if not callable(get_policy):
             return {
+                "protection_mode": "normal",
                 "delete_private_history_after_block": False,
                 "delete_private_history_scope": "self",
                 "telegram_notification": {

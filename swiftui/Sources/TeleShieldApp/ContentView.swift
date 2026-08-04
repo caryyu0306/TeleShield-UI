@@ -835,7 +835,10 @@ private struct BlockRecordsView: View {
                                 if let analysis = record.details?.analysis {
                                     Text(analysis.score.map { score in
                                         if let threshold = analysis.threshold {
-                                            return "\(analysis.analysisSourceLabel) · \(score) / \(threshold)"
+                                            let scoreLabel = analysis.scoreTypeLabel.isEmpty
+                                                ? "分數"
+                                                : analysis.scoreTypeLabel
+                                            return "\(analysis.analysisSourceLabel) · \(scoreLabel) \(score) / \(threshold)"
                                         }
                                         return analysis.analysisSourceLabel
                                     } ?? analysis.analysisSourceLabel)
@@ -871,6 +874,7 @@ private struct BlockRecordsView: View {
 
 private struct BlockRecordDetailView: View {
     let record: BlockRecord
+    @Environment(\.dismiss) private var dismiss
 
     private func joined(_ values: [String], fallback: String) -> String {
         values.isEmpty ? fallback : values.joined(separator: "、")
@@ -888,6 +892,10 @@ private struct BlockRecordDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button("關閉") {
+                        dismiss()
+                    }
+                    .keyboardShortcut(.cancelAction)
                     Text(record.displayTime)
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
@@ -920,7 +928,9 @@ private struct BlockRecordDetailView: View {
                             value: joined(analysis.matchedRuleLabels, fallback: "未提供")
                         )
                         LabeledContent(
-                            "分數",
+                            analysis.scoreTypeLabel.isEmpty
+                                ? "分數"
+                                : "分數（\(analysis.scoreTypeLabel)）",
                             value: analysis.score.flatMap { score in
                                 analysis.threshold.map { "\(score) / \($0)" }
                             } ?? "不適用"

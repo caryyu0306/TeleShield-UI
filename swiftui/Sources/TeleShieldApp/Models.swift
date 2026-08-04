@@ -406,6 +406,8 @@ struct BlockAnalysis: Codable {
     let matchedRuleLabels: [String]
     let score: Int?
     let threshold: Int?
+    let scoreType: String
+    let scoreTypeLabel: String
     let analysisSource: String
     let analysisSourceLabel: String
     let contentExcerpt: String
@@ -419,6 +421,8 @@ struct BlockAnalysis: Codable {
         case matchedRuleLabels = "matched_rule_labels"
         case score
         case threshold
+        case scoreType = "score_type"
+        case scoreTypeLabel = "score_type_label"
         case analysisSource = "analysis_source"
         case analysisSourceLabel = "analysis_source_label"
         case contentExcerpt = "content_excerpt"
@@ -434,6 +438,8 @@ struct BlockAnalysis: Codable {
         matchedRuleLabels = (try? container.decode([String].self, forKey: .matchedRuleLabels)) ?? []
         score = try? container.decode(Int.self, forKey: .score)
         threshold = try? container.decode(Int.self, forKey: .threshold)
+        scoreType = (try? container.decode(String.self, forKey: .scoreType)) ?? ""
+        scoreTypeLabel = (try? container.decode(String.self, forKey: .scoreTypeLabel)) ?? ""
         analysisSource = (try? container.decode(String.self, forKey: .analysisSource)) ?? ""
         analysisSourceLabel = (try? container.decode(String.self, forKey: .analysisSourceLabel)) ?? ""
         contentExcerpt = (try? container.decode(String.self, forKey: .contentExcerpt)) ?? ""

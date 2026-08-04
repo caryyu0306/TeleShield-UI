@@ -19,6 +19,8 @@ final class BlockRecordTests: XCTestCase {
               "matched_rule_labels": ["保證獲利", "立即加入"],
               "score": 7,
               "threshold": 4,
+              "score_type": "spam",
+              "score_type_label": "垃圾訊息",
               "analysis_source": "text",
               "analysis_source_label": "文字",
               "content_excerpt": "投資穩賺立即",
@@ -34,6 +36,7 @@ final class BlockRecordTests: XCTestCase {
         XCTAssertEqual(record.userID, "134037075")
         XCTAssertEqual(record.details?.analysis?.categoryLabels, ["投資", "廣告"])
         XCTAssertEqual(record.details?.analysis?.score, 7)
+        XCTAssertEqual(record.details?.analysis?.scoreTypeLabel, "垃圾訊息")
         XCTAssertEqual(record.details?.analysis?.contentExcerpt, "投資穩賺立即")
     }
 

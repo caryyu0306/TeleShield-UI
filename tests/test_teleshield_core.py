@@ -684,7 +684,7 @@ def test_structured_block_notification_uses_analysis_reason_and_dynamic_ids():
     assert "封鎖原因：高信心垃圾訊息" in message
     assert "分類：投資" in message
     assert "意圖：獲利承諾、立即操作" in message
-    assert "分數：" in message
+    assert "分數：13 / 4（垃圾訊息）" in message
     assert "來源：文字" in message
     assert "內容摘要：投資穩賺，立即加入" in message
 
@@ -932,7 +932,73 @@ def test_explicit_contact_handle_remains_high_confidence_for_new_sender(recogniz
     )
 
 
-def test_block_analysis_separates_reason_from_ten_character_excerpt():
+def test_block_analysis_uses_phishing_score_and_thirty_character_excerpt():
+    recognized = (
+        "功能狀態說明\n我們監測到，您的帳號近期有一些未預期的活躍波動。\n"
+        "為了保障安全，系統暫時限制了部分功能的使用。\n請盡快點擊下方按鈕，完成問題處理。\n"
+        "申請恢復帳號\n立即申請恢復"
+    )
+    decision = teleshield.analyze_spam(recognized)
+    evidence = "帳號異常，恢復帳號，輸入驗證碼，請立即處理。這是安全通知的完整內容"
+    analysis = teleshield.build_block_analysis(
+        decision,
+        source="ocr",
+        evidence=evidence,
+    )
+
+    assert decision["score"] == 0
+    assert decision["phishing_score"] == 8
+    assert analysis["score"] == 8
+    assert analysis["score_type_label"] == "釣魚風險"
+    assert len(analysis["content_excerpt"]) == 30
+    assert analysis["content_excerpt"] == evidence[:30]
+
+    message = teleshield.build_telegram_block_notification(
+        134037075,
+        "Blocked User",
+        analysis["reason"],
+        None,
+        analysis=analysis,
+        account_cfg={"display_name": "Owner", "user_id": 1},
+    )
+    assert "分數：8 / 4（釣魚風險）" in message
+    assert f"內容摘要：{evidence[:30]}" in message
+
+
+def test_get_block_records_repairs_legacy_phishing_score(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.save_block_log({
+        "blocks": [{
+            "time": "2026-08-04T04:29:01+00:00",
+            "source": "private",
+            "user_id": 134037075,
+            "name": "Blocked User",
+            "reason": "疑似帳號釣魚",
+            "details": {
+                "analysis": {
+                    "reason_code": "account_takeover",
+                    "score": 0,
+                    "threshold": 4,
+                    "phishing_signals": [
+                        "account_state",
+                        "recovery",
+                        "credential_action",
+                        "urgency",
+                    ],
+                    "content_excerpt": "an official",
+                }
+            },
+        }]
+    })
+
+    record = teleshield.get_block_records()[0]
+    analysis = record["details"]["analysis"]
+    assert analysis["score"] == 8
+    assert analysis["score_type_label"] == "釣魚風險"
+    assert analysis["threshold"] == 4
+
+
+def test_block_analysis_keeps_reason_separate_from_excerpt():
     decision = teleshield.analyze_spam(
         "投資穩賺，立即加入",
         sender_context={"new_sender": True},
@@ -948,7 +1014,7 @@ def test_block_analysis_separates_reason_from_ten_character_excerpt():
     assert analysis["category_labels"] == ["投資"]
     assert "獲利承諾" in analysis["intent_labels"]
     assert "立即操作" in analysis["intent_labels"]
-    assert len(analysis["content_excerpt"]) <= 10
+    assert len(analysis["content_excerpt"]) <= 30
 
 
 @pytest.mark.parametrize(

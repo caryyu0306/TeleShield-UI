@@ -1616,6 +1616,8 @@ def build_telegram_block_notification(
             reason_label=" ".join(str(reason or "未記錄原因").split())[:1000],
             rule_labels=["未提供分析"],
         )
+    else:
+        analysis = _normalize_block_analysis_for_display(analysis)
     display_reason = " ".join(
         str(analysis.get("reason") or reason or "未記錄原因").split()
     )[:1000]
@@ -1628,6 +1630,9 @@ def build_telegram_block_notification(
         score_text = f"{score} / {threshold}"
     else:
         score_text = "不適用"
+    score_type_label = str(analysis.get("score_type_label") or "").strip()
+    if score_type_label and score_text != "不適用":
+        score_text = f"{score_text}（{score_type_label}）"
     source_label = str(
         analysis.get("analysis_source_label")
         or _ANALYSIS_SOURCE_DISPLAY_NAMES.get(
@@ -1635,7 +1640,7 @@ def build_telegram_block_notification(
             "未提供",
         )
     )
-    content_excerpt = str(analysis.get("content_excerpt") or "無")[:10]
+    content_excerpt = str(analysis.get("content_excerpt") or "無")[:30]
     delete_enabled = deletion is not None
     if deletion is None:
         deletion_status = "未執行"
@@ -1839,7 +1844,13 @@ def get_block_records(query: str = "", source: str = "all", limit: int = 500, ac
         haystack = " ".join(str(record.get(key, "")) for key in ("user_id", "name", "reason", "source"))
         if query and query not in haystack.lower():
             continue
-        records.append(dict(record))
+        record_copy = dict(record)
+        details = record_copy.get("details")
+        if isinstance(details, dict) and isinstance(details.get("analysis"), dict):
+            details_copy = dict(details)
+            details_copy["analysis"] = _normalize_block_analysis_for_display(details["analysis"])
+            record_copy["details"] = details_copy
+        records.append(record_copy)
         if len(records) >= max(1, int(limit)):
             break
     return records
@@ -1854,6 +1865,7 @@ def export_block_records(path: str, query: str = "", source: str = "all", fmt: s
         fieldnames = [
             "time", "source", "user_id", "name", "reason",
             "categories", "intents", "matched_rules", "score", "threshold",
+            "score_type_label",
             "analysis_source", "content_excerpt",
         ]
         with output.open("w", newline="", encoding="utf-8") as handle:
@@ -1878,6 +1890,7 @@ def export_block_records(path: str, query: str = "", source: str = "all", fmt: s
                     "matched_rules": "、".join(analysis.get("matched_rule_labels", [])),
                     "score": analysis.get("score", ""),
                     "threshold": analysis.get("threshold", ""),
+                    "score_type_label": analysis.get("score_type_label", ""),
                     "analysis_source": analysis.get("analysis_source_label", ""),
                     "content_excerpt": analysis.get("content_excerpt", ""),
                 })
@@ -3095,7 +3108,7 @@ def _unique_labels(values: list[str]) -> list[str]:
     return result
 
 
-def _clean_content_excerpt(value: str, limit: int = 10) -> str:
+def _clean_content_excerpt(value: str, limit: int = 30) -> str:
     """Return a short, readable evidence preview without the OCR marker."""
     text = str(value or "")
     text = re.sub(r"^\s*\[OCR\]\s*", "", text, flags=re.IGNORECASE)
@@ -3183,12 +3196,24 @@ def build_block_analysis(
     if not matched_rule_labels and reason_code == "blacklist":
         matched_rule_labels = ["黑名單"]
 
+    score_type = "spam"
+    score_type_label = "垃圾訊息"
     score = decision.get("score")
+    if reason_code == "account_takeover":
+        # Phishing is intentionally scored separately from ordinary spam. A
+        # phishing-only message can therefore have score=0 while still being
+        # blocked; expose the score that actually caused the decision.
+        score = decision.get("phishing_score")
+        score_type = "phishing"
+        score_type_label = "釣魚風險"
     threshold = decision.get("threshold")
     if isinstance(score, bool) or not isinstance(score, (int, float)):
         score = None
     if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
         threshold = None
+    phishing_score = decision.get("phishing_score")
+    if isinstance(phishing_score, bool) or not isinstance(phishing_score, (int, float)):
+        phishing_score = None
 
     sender_labels = []
     if sender_context.get("new_sender"):
@@ -3208,11 +3233,39 @@ def build_block_analysis(
         "matched_rule_labels": matched_rule_labels,
         "score": int(score) if score is not None else None,
         "threshold": int(threshold) if threshold is not None else None,
+        "phishing_score": int(phishing_score) if phishing_score is not None else None,
+        "score_type": score_type,
+        "score_type_label": score_type_label,
         "analysis_source": source,
         "analysis_source_label": _ANALYSIS_SOURCE_DISPLAY_NAMES.get(source, source or "未提供"),
         "content_excerpt": _clean_content_excerpt(evidence),
         "sender_context_labels": sender_labels,
     }
+
+
+def _normalize_block_analysis_for_display(analysis: dict) -> dict:
+    """Keep new and legacy analysis records on the same score representation."""
+    normalized = dict(analysis)
+    reason_code = str(normalized.get("reason_code") or "")
+    if reason_code == "account_takeover":
+        phishing_score = normalized.get("phishing_score")
+        if isinstance(phishing_score, bool) or not isinstance(phishing_score, (int, float)):
+            signals = normalized.get("phishing_signals") or ()
+            if isinstance(signals, (list, tuple)):
+                phishing_score = sum(
+                    PHISHING_SIGNAL_WEIGHTS.get(str(signal), 0)
+                    for signal in signals
+                )
+        if isinstance(phishing_score, (int, float)) and not isinstance(phishing_score, bool):
+            normalized["score"] = int(phishing_score)
+            if not isinstance(normalized.get("threshold"), (int, float)):
+                normalized["threshold"] = SPAM_BLOCK_SCORE
+        normalized["score_type"] = "phishing"
+        normalized["score_type_label"] = "釣魚風險"
+    elif not normalized.get("score_type_label"):
+        normalized["score_type"] = "spam"
+        normalized["score_type_label"] = "垃圾訊息"
+    return normalized
 
 
 def is_spam(text: str, cfg: dict = None, account_id: Optional[str] = None) -> bool:

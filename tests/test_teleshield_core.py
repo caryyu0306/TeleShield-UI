@@ -911,6 +911,39 @@ def test_phonetic_normalization_does_not_block_ambiguous_homophones():
     assert decision["categories"] == []
 
 
+@pytest.mark.parametrize("ordinary_text", ["專長", "專長給我", "工程人生"])
+def test_natural_two_character_phonetic_fragments_do_not_block(ordinary_text):
+    decision = teleshield.analyze_spam(
+        ordinary_text,
+        sender_context={"new_sender": True},
+    )
+
+    assert decision["should_block"] is False
+    assert decision["categories"] == []
+    assert decision["intents"] == []
+
+
+def test_tone_aware_short_homophone_still_blocks_payment_obfuscation():
+    decision = teleshield.analyze_spam("転丈給我")
+
+    assert decision["should_block"] is True
+    assert "payment" in decision["intents"]
+    assert any(
+        rule.get("confidence") == "pinyin_tone"
+        for rule in decision["matched_rules"]
+    )
+
+
+def test_long_ocr_text_does_not_promote_natural_phonetic_fragments():
+    recognized = "Cary 的超爆肝工程人生\n監工犬 Cody\n專長：盯著你不放"
+
+    decision = teleshield.analyze_spam(recognized)
+
+    assert decision["should_block"] is False
+    assert decision["categories"] == []
+    assert decision["intents"] == []
+
+
 @pytest.mark.parametrize(
     "variant, skeleton, category",
     [

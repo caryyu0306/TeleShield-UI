@@ -2247,6 +2247,70 @@ def _contains_phonetic_form(
     )
 
 
+def _cjk_runs(text: str) -> list[str]:
+    """Return contiguous CJK runs without merging unrelated OCR words."""
+    runs: list[str] = []
+    current: list[str] = []
+    for character in text:
+        if _is_cjk_character(character):
+            current.append(character)
+            continue
+        if current:
+            runs.append("".join(current))
+            current.clear()
+    if current:
+        runs.append("".join(current))
+    return runs
+
+
+def _phonetic_match_has_cjk_boundary(
+    message_forms: dict[str, str],
+    literal: str,
+    representation: str,
+) -> bool:
+    """Check whether a short phonetic hit touches a natural CJK word edge.
+
+    Long OCR text can contain accidental two-syllable sequences inside an
+    unrelated word, such as ``工程人生`` containing the sounds for ``成人``.
+    A short homophone at the edge of a CJK run remains useful for obfuscated
+    messages such as ``転丈給我``.  Pure pinyin/Zhuyin input has no source CJK
+    run, so it keeps the existing high-confidence behavior.
+    """
+    normalized = message_forms.get("text", "")
+    if not any(_is_cjk_character(character) for character in normalized):
+        return True
+
+    compact_literal = _compact_matching_text(normalize_message_text(literal))
+    if len(compact_literal) != 2 or not all(_is_cjk_character(character) for character in compact_literal):
+        return True
+
+    target_forms = build_message_forms(literal)
+    if representation == "pinyin":
+        target_value = target_forms.get("pinyin_tone", "")
+        style = _PinyinStyle.TONE3 if _PinyinStyle is not None else None
+    else:
+        target_value = target_forms.get("zhuyin_tone", "")
+        style = _PinyinStyle.BOPOMOFO if _PinyinStyle is not None else None
+    if not target_value or style is None:
+        return False
+
+    target_tokens = _phonetic_tokens(target_value, representation)
+    if not target_tokens:
+        return False
+    width = len(target_tokens)
+    for run in _cjk_runs(normalized):
+        run_value = _phoneticize_cjk(run, style)
+        run_tokens = _phonetic_tokens(run_value, representation)
+        if len(target_tokens) > len(run_tokens):
+            continue
+        for index in range(len(run_tokens) - width + 1):
+            if run_tokens[index:index + width] != target_tokens:
+                continue
+            if index == 0 or index + width == len(run_tokens):
+                return True
+    return False
+
+
 def _is_strong_literal(literal: str) -> bool:
     normalized_literal = normalize_message_text(literal)
     return any(
@@ -2266,6 +2330,64 @@ def _is_phishing_strong_literal(literal: str) -> bool:
 
 def _is_ambiguous_match(match: dict[str, str]) -> bool:
     return match.get("confidence") in {"ambiguous_phonetic", "ambiguous_skeleton"}
+
+
+def _cjk_skeleton_match_has_local_interleave(
+    message_forms: dict[str, str],
+    literal: str,
+) -> bool:
+    """Return whether a skeleton hit has non-CJK content inside that phrase."""
+    normalized = message_forms.get("text", "")
+    positions = [
+        index for index, character in enumerate(normalized)
+        if _is_cjk_character(character)
+    ]
+    if not positions:
+        return False
+    skeleton = "".join(normalized[index] for index in positions)
+    compact_literal = _compact_matching_text(normalize_message_text(literal))
+    if not compact_literal or not all(_is_cjk_character(character) for character in compact_literal):
+        return False
+
+    target_forms = _build_cjk_skeleton_forms(compact_literal)
+    channels = (
+        "cjk_skeleton", "cjk_skeleton_compact",
+        "cjk_skeleton_pinyin_tone", "cjk_skeleton_pinyin_tone_compact",
+        "cjk_skeleton_pinyin", "cjk_skeleton_pinyin_compact",
+        "cjk_skeleton_pinyin_loose", "cjk_skeleton_pinyin_loose_compact",
+        "cjk_skeleton_zhuyin_tone", "cjk_skeleton_zhuyin_tone_compact",
+        "cjk_skeleton_zhuyin", "cjk_skeleton_zhuyin_compact",
+    )
+    for channel in channels:
+        target = target_forms.get(channel, "")
+        message = message_forms.get(channel, "")
+        if not target or not message:
+            continue
+        if "pinyin" in channel:
+            representation = "pinyin"
+            target_tokens = _phonetic_tokens(target, representation)
+            message_tokens = _phonetic_tokens(message, representation)
+        elif "zhuyin" in channel:
+            representation = "zhuyin"
+            target_tokens = _phonetic_tokens(target, representation)
+            message_tokens = _phonetic_tokens(message, representation)
+        else:
+            representation = "text"
+            target_tokens = list(target)
+            message_tokens = list(message)
+        if not target_tokens or len(target_tokens) > len(message_tokens):
+            continue
+
+        width = len(target_tokens)
+        for index in range(len(message_tokens) - width + 1):
+            if message_tokens[index:index + width] != target_tokens:
+                continue
+            start = positions[index]
+            end = positions[index + width - 1]
+            gap = normalized[start + 1:end]
+            if gap and len(gap) <= 12 and any(not _is_cjk_character(character) for character in gap):
+                return True
+    return False
 
 
 def _find_cjk_skeleton_match(
@@ -2320,10 +2442,14 @@ def _find_cjk_skeleton_match(
         if not matched:
             continue
 
+        has_local_interleave = _cjk_skeleton_match_has_local_interleave(
+            message_forms,
+            compact_literal,
+        )
         if representation == "text":
-            confidence = "skeleton" if strong else "ambiguous_skeleton"
+            confidence = "skeleton" if strong and has_local_interleave else "ambiguous_skeleton"
         else:
-            confidence = representation if strong else "ambiguous_phonetic"
+            confidence = representation if strong and has_local_interleave else "ambiguous_phonetic"
         return {
             "literal": compact_literal,
             "channel": channel,
@@ -2374,16 +2500,41 @@ def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional
             else:
                 representation = "text"
             compact_literal = _compact_matching_text(literal)
-            ambiguous_phonetic = (
-                representation != "text"
-                and all(_is_cjk_character(character) for character in compact_literal)
-                and len(compact_literal) == 2
-                and not _is_strong_literal(literal)
+            has_cjk_input = any(
+                _is_cjk_character(character)
+                for character in message_forms.get("text", "")
             )
+            is_two_character_cjk_literal = (
+                representation != "text"
+                and has_cjk_input
+                and len(compact_literal) == 2
+                and all(_is_cjk_character(character) for character in compact_literal)
+            )
+            is_tone_channel = "_tone" in channel
+            ambiguous_phonetic = (
+                is_two_character_cjk_literal
+                and (
+                    not is_tone_channel
+                    or not _phonetic_match_has_cjk_boundary(
+                        message_forms,
+                        literal,
+                        representation,
+                    )
+                )
+            )
+            if ambiguous_phonetic:
+                skeleton_match = _find_cjk_skeleton_match(message_forms, literal)
+                if skeleton_match and not _is_ambiguous_match(skeleton_match):
+                    return skeleton_match
+                confidence = "ambiguous_phonetic"
+            elif representation != "text" and is_tone_channel:
+                confidence = f"{representation}_tone"
+            else:
+                confidence = representation
             return {
                 "literal": literal,
                 "channel": representation,
-                "confidence": "ambiguous_phonetic" if ambiguous_phonetic else representation,
+                "confidence": confidence,
             }
     return _find_cjk_skeleton_match(message_forms, literal)
 

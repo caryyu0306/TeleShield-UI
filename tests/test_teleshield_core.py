@@ -911,6 +911,39 @@ def test_phonetic_normalization_does_not_block_ambiguous_homophones():
     assert decision["categories"] == []
 
 
+@pytest.mark.parametrize("ordinary_text", ["專長", "專長給我", "工程人生"])
+def test_natural_two_character_phonetic_fragments_do_not_block(ordinary_text):
+    decision = teleshield.analyze_spam(
+        ordinary_text,
+        sender_context={"new_sender": True},
+    )
+
+    assert decision["should_block"] is False
+    assert decision["categories"] == []
+    assert decision["intents"] == []
+
+
+def test_tone_aware_short_homophone_still_blocks_payment_obfuscation():
+    decision = teleshield.analyze_spam("転丈給我")
+
+    assert decision["should_block"] is True
+    assert "payment" in decision["intents"]
+    assert any(
+        rule.get("confidence") == "pinyin_tone"
+        for rule in decision["matched_rules"]
+    )
+
+
+def test_long_ocr_text_does_not_promote_natural_phonetic_fragments():
+    recognized = "Cary 的超爆肝工程人生\n監工犬 Cody\n專長：盯著你不放"
+
+    decision = teleshield.analyze_spam(recognized)
+
+    assert decision["should_block"] is False
+    assert decision["categories"] == []
+    assert decision["intents"] == []
+
+
 @pytest.mark.parametrize(
     "variant, skeleton, category",
     [
@@ -1071,6 +1104,140 @@ def test_ocr_content_uses_the_same_homophone_pipeline(monkeypatch):
         rule.get("channel") == "pinyin"
         for rule in result["decision"]["matched_rules"]
     )
+
+
+@pytest.mark.parametrize(
+    "recognized",
+    [
+        "功能狀態說明\n我們監測到，您的帳號近期有一些未預期的活躍波動。\n"
+        "為了保障安全，系統暫時限制了部分功能的使用。\n請盡快點擊下方按鈕，完成問題處理。\n"
+        "申請恢復帳號\n立即申請恢復",
+        "功能状态说明\n我们监测到，您的账号近期有一些未预期的活跃波动。\n"
+        "为了保障安全，系统暂时限制了部分功能的使用。\n请尽快点击下方按钮，完成问题处理。\n"
+        "申请恢复账号\n立即申请恢复",
+    ],
+)
+def test_account_takeover_phishing_matches_traditional_and_simplified(recognized):
+    decision = teleshield.analyze_spam(recognized)
+
+    assert decision["should_block"] is True
+    assert decision["phishing_should_block"] is True
+    assert decision["phishing_group_count"] >= 2
+    assert {
+        "account_state",
+        "recovery",
+        "credential_action",
+        "urgency",
+    }.issubset(decision["phishing_signals"])
+    assert "account_takeover" in decision["categories"]
+
+
+@pytest.mark.parametrize(
+    "recognized",
+    [
+        "Telegram Security Alert: Your account has been restricted. "
+        "Restore your account by scanning the QR code within 24 hours.",
+        "Your account has been restricted. Click here to restore access "
+        "and enter the verification code.",
+        "Help me vote for my friend in the contest and scan the QR code.",
+    ],
+)
+def test_account_takeover_phishing_matches_english_messages(recognized):
+    decision = teleshield.analyze_spam(recognized)
+
+    assert decision["should_block"] is True
+    assert decision["phishing_should_block"] is True
+    assert "account_takeover" in decision["categories"]
+
+
+@pytest.mark.parametrize("channel", ["pinyin_tone", "pinyin", "pinyin_loose", "zhuyin_tone", "zhuyin"])
+def test_phishing_rules_keep_chinese_phonetic_channels(channel):
+    canonical = "帳號異常，申請恢復帳號"
+    phonetic_text = teleshield.build_message_forms(canonical)[channel]
+
+    decision = teleshield.analyze_spam(phonetic_text)
+
+    assert decision["should_block"] is True
+    assert {"account_state", "recovery"}.issubset(decision["phishing_signals"])
+
+
+@pytest.mark.parametrize(
+    "ordinary_text",
+    [
+        "Telegram support",
+        "Please vote for me in a contest",
+        "Please verify your account",
+    ],
+)
+def test_single_phishing_signal_does_not_block_by_itself(ordinary_text):
+    decision = teleshield.analyze_spam(
+        ordinary_text,
+        sender_context={"new_sender": True},
+    )
+
+    assert decision["phishing_group_count"] == 1
+    assert decision["phishing_should_block"] is False
+    assert decision["should_block"] is False
+
+
+def test_phishing_cjk_skeleton_matches_inserted_english_and_numbers():
+    decision = teleshield.analyze_spam("功能price受限，申請foo恢復帳號")
+
+    assert decision["should_block"] is True
+    assert decision["phishing_should_block"] is True
+    assert {"account_state", "recovery"}.issubset(decision["phishing_signals"])
+    assert any(
+        rule.get("group") == "phishing_recovery"
+        and rule.get("channel", "").startswith("cjk_skeleton_")
+        for rule in decision["matched_rules"]
+    )
+
+
+def test_learned_phishing_rule_keeps_simplified_and_mixed_matching():
+    cfg = {
+        "learned_patterns": {
+            "keywords": ["恢復帳號"],
+            "patterns": [],
+        }
+    }
+
+    decision = teleshield.analyze_spam("恢复foo账号", cfg)
+
+    assert decision["should_block"] is True
+    assert decision["learned_matches"]
+    assert decision["learned_matches"][0]["kind"] == "keywords"
+
+    english_cfg = {
+        "learned_patterns": {
+            "keywords": ["restore your account"],
+            "patterns": [],
+        }
+    }
+    english_decision = teleshield.analyze_spam("restore-your-account", english_cfg)
+
+    assert english_decision["should_block"] is True
+    assert english_decision["learned_matches"]
+
+
+def test_ocr_phishing_text_uses_the_same_pipeline(monkeypatch):
+    message = SimpleNamespace(text="", photo=True)
+
+    async def fake_check_photo(client, msg):
+        assert msg is message
+        return "检测到异常活动，您的账号已被限制。申请恢复账号，立即扫描 QR Code。"
+
+    monkeypatch.setattr(teleshield, "check_photo", fake_check_photo)
+    result = asyncio.run(
+        teleshield.analyze_message_content(
+            object(),
+            message,
+            sender_context={"new_sender": True},
+        )
+    )
+
+    assert result["source"] == "ocr"
+    assert result["decision"]["should_block"] is True
+    assert result["decision"]["phishing_should_block"] is True
 
 
 @pytest.mark.parametrize(

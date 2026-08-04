@@ -2347,6 +2347,49 @@ def _meaningful_literal(value: str) -> bool:
     return len(compact) >= 2
 
 
+_ENGLISH_SEPARATOR_TOLERANT_TOKENS = frozenset({"av", "nft", "usdt"})
+
+
+def _build_english_literal_pattern(literal: str) -> Optional[str]:
+    """Build an ASCII-boundary matcher for built-in English literals.
+
+    English defaults must not be found inside an unrelated product or normal
+    English word (for example ``AV`` inside ``CeraVe``).  Short acronyms keep
+    support for punctuation/space obfuscation such as ``A.V.`` and ``A V``.
+    Mixed Chinese/English literals intentionally stay on the normal literal
+    path because their Chinese context is part of the rule.
+    """
+    normalized = normalize_message_text(literal)
+    if not normalized or any(not character.isascii() for character in normalized):
+        return None
+    if not re.search(r"[A-Za-z]", normalized):
+        return None
+
+    tokens = re.findall(r"[A-Za-z0-9]+", normalized)
+    if not tokens:
+        return None
+
+    parts = []
+    for index, token in enumerate(tokens):
+        if index:
+            # English words in a phrase may be separated by spaces, hyphens,
+            # or OCR punctuation, but never by another ASCII word character.
+            parts.append(r"[\W_]+")
+        if token.casefold() in _ENGLISH_SEPARATOR_TOLERANT_TOKENS:
+            body = r"[\W_]*".join(re.escape(character) for character in token)
+        else:
+            body = re.escape(token)
+        parts.append(rf"(?<![A-Za-z0-9]){body}(?![A-Za-z0-9])")
+    return "".join(parts)
+
+
+def _matches_built_in_english_literal(message: str, literal: str) -> bool:
+    pattern = _build_english_literal_pattern(literal)
+    if pattern is None:
+        return False
+    return re.search(pattern, message, re.IGNORECASE) is not None
+
+
 def _phonetic_tokens(value: str, representation: str) -> list[str]:
     if representation == "pinyin":
         return [token.casefold() for token in _PINYIN_SYLLABLE_RE.findall(value)]
@@ -2469,6 +2512,7 @@ def _is_ambiguous_match(match: dict[str, str]) -> bool:
 def _cjk_skeleton_match_has_local_interleave(
     message_forms: dict[str, str],
     literal: str,
+    reject_line_breaks: bool = False,
 ) -> bool:
     """Return whether a skeleton hit has non-CJK content inside that phrase."""
     normalized = message_forms.get("text", "")
@@ -2519,7 +2563,12 @@ def _cjk_skeleton_match_has_local_interleave(
             start = positions[index]
             end = positions[index + width - 1]
             gap = normalized[start + 1:end]
-            if gap and len(gap) <= 12 and any(not _is_cjk_character(character) for character in gap):
+            if (
+                gap
+                and len(gap) <= 12
+                and (not reject_line_breaks or ("\n" not in gap and "\r" not in gap))
+                and any(not _is_cjk_character(character) for character in gap)
+            ):
                 return True
     return False
 
@@ -2527,6 +2576,7 @@ def _cjk_skeleton_match_has_local_interleave(
 def _find_cjk_skeleton_match(
     message_forms: dict[str, str],
     literal: str,
+    protect_ocr_line_breaks: bool = False,
 ) -> Optional[dict[str, str]]:
     """Match a Chinese literal against an obfuscated CJK-only message form."""
     if not message_forms.get("cjk_skeleton"):
@@ -2576,9 +2626,21 @@ def _find_cjk_skeleton_match(
         if not matched:
             continue
 
+        if (
+            protect_ocr_line_breaks
+            and not _ocr_short_cjk_match_is_line_local(
+                message_forms,
+                target_forms,
+                compact_literal,
+                channel,
+            )
+        ):
+            continue
+
         has_local_interleave = _cjk_skeleton_match_has_local_interleave(
             message_forms,
             compact_literal,
+            reject_line_breaks=protect_ocr_line_breaks,
         )
         if representation == "text":
             confidence = "skeleton" if strong and has_local_interleave else "ambiguous_skeleton"
@@ -2592,16 +2654,87 @@ def _find_cjk_skeleton_match(
     return None
 
 
-def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional[dict[str, str]]:
+def _channel_contains_value(message: str, target: str, channel: str) -> bool:
+    if not message or not target:
+        return False
+    if "zhuyin" in channel:
+        return _contains_phonetic_form(
+            message,
+            target,
+            "zhuyin",
+            compact=channel.endswith("_compact"),
+        )
+    if "pinyin" in channel:
+        return _contains_phonetic_form(
+            message,
+            target,
+            "pinyin",
+            compact=channel.endswith("_compact"),
+        )
+    return target in message
+
+
+def _ocr_short_cjk_match_is_line_local(
+    message_forms: dict[str, str],
+    target_forms: dict[str, str],
+    literal: str,
+    channel: str,
+) -> bool:
+    """Reject only ambiguous two-character CJK hits spanning OCR lines."""
+    compact_literal = _compact_matching_text(normalize_message_text(literal))
+    if (
+        len(compact_literal) != 2
+        or not all(_is_cjk_character(character) for character in compact_literal)
+        or channel in {"text", "leet"}
+    ):
+        return True
+
+    normalized = message_forms.get("text", "")
+    if "\n" not in normalized and "\r" not in normalized:
+        return True
+
+    for line in normalized.splitlines():
+        line_forms = build_message_forms(line)
+        if channel.startswith("cjk_skeleton") and not line_forms.get("cjk_skeleton"):
+            line_skeleton = "".join(
+                character for character in line if _is_cjk_character(character)
+            )
+            line_forms.update(_build_cjk_skeleton_forms(line_skeleton))
+        if _channel_contains_value(
+            line_forms.get(channel, ""),
+            target_forms.get(channel, ""),
+            channel,
+        ):
+            return True
+    return False
+
+
+def _find_literal_match(
+    message_forms: dict[str, str],
+    literal: str,
+    built_in: bool = False,
+    protect_ocr_line_breaks: bool = False,
+) -> Optional[dict[str, str]]:
     if not literal or not _meaningful_literal(literal):
         return None
     target_forms = build_message_forms(literal)
-    channels = (
-        "text", "text_compact", "leet", "leet_compact",
-        "pinyin_tone", "pinyin_tone_compact", "pinyin", "pinyin_compact",
-        "pinyin_loose", "pinyin_loose_compact",
-        "zhuyin_tone", "zhuyin_tone_compact", "zhuyin", "zhuyin_compact",
+    english_pattern = (
+        _build_english_literal_pattern(literal)
+        if built_in
+        else None
     )
+    if english_pattern:
+        # Built-in English phrases stay on readable text/leet channels.  This
+        # avoids joining unrelated OCR words through text_compact while still
+        # allowing punctuation and space variants through the regex matcher.
+        channels = ("text", "leet")
+    else:
+        channels = (
+            "text", "text_compact", "leet", "leet_compact",
+            "pinyin_tone", "pinyin_tone_compact", "pinyin", "pinyin_compact",
+            "pinyin_loose", "pinyin_loose_compact",
+            "zhuyin_tone", "zhuyin_tone_compact", "zhuyin", "zhuyin_compact",
+        )
     for channel in channels:
         target = target_forms.get(channel, "")
         message = message_forms.get(channel, "")
@@ -2625,8 +2758,21 @@ def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional
             )
         else:
             representation = "text"
-            matched = target in message
+            if english_pattern:
+                matched = _matches_built_in_english_literal(message, literal)
+            else:
+                matched = target in message
         if matched:
+            if (
+                protect_ocr_line_breaks
+                and not _ocr_short_cjk_match_is_line_local(
+                    message_forms,
+                    target_forms,
+                    literal,
+                    channel,
+                )
+            ):
+                continue
             if channel.startswith("zhuyin"):
                 representation = "zhuyin"
             elif channel.startswith("pinyin"):
@@ -2657,7 +2803,11 @@ def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional
                 )
             )
             if ambiguous_phonetic:
-                skeleton_match = _find_cjk_skeleton_match(message_forms, literal)
+                skeleton_match = _find_cjk_skeleton_match(
+                    message_forms,
+                    literal,
+                    protect_ocr_line_breaks=protect_ocr_line_breaks,
+                )
                 if skeleton_match and not _is_ambiguous_match(skeleton_match):
                     return skeleton_match
                 confidence = "ambiguous_phonetic"
@@ -2670,7 +2820,11 @@ def _find_literal_match(message_forms: dict[str, str], literal: str) -> Optional
                 "channel": representation,
                 "confidence": confidence,
             }
-    return _find_cjk_skeleton_match(message_forms, literal)
+    return _find_cjk_skeleton_match(
+        message_forms,
+        literal,
+        protect_ocr_line_breaks=protect_ocr_line_breaks,
+    )
 
 
 def _simple_pattern_literal(pattern: str) -> Optional[str]:
@@ -2689,6 +2843,8 @@ def _find_pattern_match(
     pattern: str,
     channels: Optional[tuple[str, ...]] = None,
     use_cjk_skeleton: Optional[bool] = None,
+    built_in: bool = False,
+    protect_ocr_line_breaks: bool = False,
 ) -> Optional[dict[str, str]]:
     if not pattern:
         return None
@@ -2699,16 +2855,28 @@ def _find_pattern_match(
     # learned ``投資`` pattern also recognizes ``頭資`` / pinyin / Zhuyin.
     literal = _simple_pattern_literal(normalized_pattern)
     if literal:
-        literal_match = _find_literal_match(message_forms, literal)
+        literal_match = _find_literal_match(
+            message_forms,
+            literal,
+            built_in=built_in,
+            protect_ocr_line_breaks=protect_ocr_line_breaks,
+        )
         if literal_match:
             return {"pattern": pattern, **literal_match}
 
-    matching_channels = channels or (
-        "text", "text_compact", "leet", "leet_compact",
-        "pinyin_tone", "pinyin_tone_compact", "pinyin", "pinyin_compact",
-        "pinyin_loose", "pinyin_loose_compact",
-        "zhuyin_tone", "zhuyin_tone_compact", "zhuyin", "zhuyin_compact",
-    )
+    if channels is not None:
+        matching_channels = channels
+    elif built_in and re.search(r"[A-Za-z]", normalized_pattern):
+        # Built-in English regexes should not gain matches by compacting
+        # unrelated OCR words or crossing OCR line boundaries.
+        matching_channels = ("text", "leet")
+    else:
+        matching_channels = (
+            "text", "text_compact", "leet", "leet_compact",
+            "pinyin_tone", "pinyin_tone_compact", "pinyin", "pinyin_compact",
+            "pinyin_loose", "pinyin_loose_compact",
+            "zhuyin_tone", "zhuyin_tone_compact", "zhuyin", "zhuyin_compact",
+        )
     for channel in matching_channels:
         message = message_forms.get(channel, "")
         if not message:
@@ -2716,6 +2884,18 @@ def _find_pattern_match(
         try:
             match = re.search(normalized_pattern, message, re.IGNORECASE)
             if match:
+                if built_in and not _english_regex_match_has_boundaries(message, match):
+                    continue
+                if (
+                    protect_ocr_line_breaks
+                    and not _ocr_short_pattern_match_is_line_local(
+                        message_forms,
+                        normalized_pattern,
+                        channel,
+                        match,
+                    )
+                ):
+                    continue
                 if channel.startswith("zhuyin"):
                     representation = "zhuyin"
                 elif channel.startswith("pinyin"):
@@ -2737,16 +2917,70 @@ def _find_pattern_match(
         skeleton = message_forms.get("cjk_skeleton", "")
         if skeleton:
             try:
-                if re.search(normalized_pattern, skeleton, re.IGNORECASE):
+                match = re.search(normalized_pattern, skeleton, re.IGNORECASE)
+                if match and (
+                    not protect_ocr_line_breaks
+                    or _ocr_short_pattern_match_is_line_local(
+                        message_forms,
+                        normalized_pattern,
+                        "cjk_skeleton",
+                        match,
+                    )
+                ):
                     return {"pattern": pattern, "channel": "cjk_skeleton"}
             except re.error:
                 pass
     return None
 
 
+def _english_regex_match_has_boundaries(message: str, match: re.Match) -> bool:
+    """Reject built-in regex hits embedded inside longer ASCII words."""
+    matched_text = match.group(0)
+    for token in re.finditer(r"[A-Za-z0-9]+", matched_text):
+        start = match.start() + token.start()
+        end = match.start() + token.end()
+        if start > 0 and re.match(r"[A-Za-z0-9]", message[start - 1]):
+            return False
+        if end < len(message) and re.match(r"[A-Za-z0-9]", message[end]):
+            return False
+    return True
+
+
+def _ocr_short_pattern_match_is_line_local(
+    message_forms: dict[str, str],
+    pattern: str,
+    channel: str,
+    match: re.Match,
+) -> bool:
+    """Reject a two-character CJK regex hit assembled across OCR lines."""
+    matched_cjk = "".join(
+        character for character in match.group(0)
+        if _is_cjk_character(character)
+    )
+    if len(matched_cjk) != 2 or channel in {"text", "leet"}:
+        return True
+    normalized = message_forms.get("text", "")
+    if "\n" not in normalized and "\r" not in normalized:
+        return True
+    for line in normalized.splitlines():
+        line_forms = build_message_forms(line)
+        if channel.startswith("cjk_skeleton") and not line_forms.get("cjk_skeleton"):
+            line_skeleton = "".join(
+                character for character in line if _is_cjk_character(character)
+            )
+            line_forms.update(_build_cjk_skeleton_forms(line_skeleton))
+        try:
+            if re.search(pattern, line_forms.get(channel, ""), re.IGNORECASE):
+                return True
+        except re.error:
+            return True
+    return False
+
+
 def _find_contact_pattern_match(
     message_forms: dict[str, str],
     pattern: str,
+    protect_ocr_line_breaks: bool = False,
 ) -> Optional[dict[str, str]]:
     """Match contact regexes without cross-word compact-form collisions.
 
@@ -2761,6 +2995,8 @@ def _find_contact_pattern_match(
         pattern,
         channels=("text", "leet"),
         use_cjk_skeleton=False,
+        built_in=True,
+        protect_ocr_line_breaks=protect_ocr_line_breaks,
     )
     if match and pattern == SPAM_CATEGORY_PATTERNS["contact"][1]:
         matched_text = str(match.get("match_text") or "")
@@ -2768,11 +3004,19 @@ def _find_contact_pattern_match(
             re.search(r"(?:line|wechat|whatsapp|telegram|tg)\s*[:：@._\-]", matched_text, re.IGNORECASE)
         )
         username_match = re.search(r"([a-z0-9_]{3,})\s*$", matched_text, re.IGNORECASE)
+        if username_match and username_match.group(1).isdigit():
+            # A phone number or numeric service line is not a Telegram/LINE
+            # username. Explicit handles with letters remain supported.
+            return None
         if (
             not explicit_separator
             and username_match
             and username_match.group(1).casefold() in _CONTACT_GENERIC_WORDS
         ):
+            return None
+    if match and pattern == SPAM_CATEGORY_PATTERNS["contact"][3]:
+        handle = str(match.get("match_text") or "").lstrip("@").strip()
+        if handle.isdigit():
             return None
     if match and pattern != SPAM_CATEGORY_PATTERNS["contact"][0]:
         match["confidence"] = "contact_handle"
@@ -2784,6 +3028,7 @@ def _find_phishing_signal_matches(
     phrases: tuple[str, ...],
     patterns: tuple[str, ...],
     has_cjk_input: bool,
+    protect_ocr_line_breaks: bool = False,
 ) -> list[dict[str, str]]:
     """Find one explainable set of matches for one phishing evidence group.
 
@@ -2818,9 +3063,25 @@ def _find_phishing_signal_matches(
         matches.append(match)
 
     for phrase in phrases:
-        add_match(_find_literal_match(message_forms, phrase), "literal")
+        add_match(
+            _find_literal_match(
+                message_forms,
+                phrase,
+                built_in=True,
+                protect_ocr_line_breaks=protect_ocr_line_breaks,
+            ),
+            "literal",
+        )
     for pattern in patterns:
-        add_match(_find_pattern_match(message_forms, pattern), "pattern")
+        add_match(
+            _find_pattern_match(
+                message_forms,
+                pattern,
+                built_in=True,
+                protect_ocr_line_breaks=protect_ocr_line_breaks,
+            ),
+            "pattern",
+        )
     return matches
 
 
@@ -2893,6 +3154,7 @@ def analyze_spam(
     cfg: dict = None,
     account_id: Optional[str] = None,
     sender_context: Optional[dict] = None,
+    protect_ocr_line_breaks: bool = False,
 ) -> dict:
     """Return explainable first-message spam evidence and block decision."""
     original = str(text or "")
@@ -2932,7 +3194,12 @@ def analyze_spam(
     for category, phrases in SPAM_CATEGORY_PHRASES.items():
         category_matches = []
         for phrase in phrases:
-            match = _find_literal_match(message_forms, phrase)
+            match = _find_literal_match(
+                message_forms,
+                phrase,
+                built_in=True,
+                protect_ocr_line_breaks=protect_ocr_line_breaks,
+            )
             if match:
                 category_matches.append(match)
         if not category_matches:
@@ -2963,12 +3230,28 @@ def analyze_spam(
     for intent, patterns in SPAM_CATEGORY_PATTERNS.items():
         intent_matches = []
         for phrase in SPAM_INTENT_PHRASES.get(intent, ()):
-            match = _find_literal_match(message_forms, phrase)
+            match = _find_literal_match(
+                message_forms,
+                phrase,
+                built_in=True,
+                protect_ocr_line_breaks=protect_ocr_line_breaks,
+            )
             if match:
                 intent_matches.append(match)
         for pattern in patterns:
-            matcher = _find_contact_pattern_match if intent == "contact" else _find_pattern_match
-            match = matcher(message_forms, pattern)
+            if intent == "contact":
+                match = _find_contact_pattern_match(
+                    message_forms,
+                    pattern,
+                    protect_ocr_line_breaks=protect_ocr_line_breaks,
+                )
+            else:
+                match = _find_pattern_match(
+                    message_forms,
+                    pattern,
+                    built_in=True,
+                    protect_ocr_line_breaks=protect_ocr_line_breaks,
+                )
             if match:
                 intent_matches.append(match)
         if not intent_matches:
@@ -3007,6 +3290,7 @@ def analyze_spam(
             phrases,
             PHISHING_SIGNAL_PATTERNS.get(signal, ()),
             has_cjk_input,
+            protect_ocr_line_breaks=protect_ocr_line_breaks,
         )
         if not signal_matches:
             continue
@@ -3452,6 +3736,7 @@ async def analyze_message_content(
         cfg,
         account_id=account_id,
         sender_context=sender_context,
+        protect_ocr_line_breaks=True,
     )
     if not ocr_decision["should_block"]:
         return {

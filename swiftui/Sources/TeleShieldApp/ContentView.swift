@@ -781,6 +781,7 @@ private struct BlockRecordsView: View {
     @ObservedObject var client: CoreClient
     @State private var query = ""
     @State private var source = "all"
+    @State private var selectedRecord: BlockRecord?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -817,13 +818,39 @@ private struct BlockRecordsView: View {
                 .foregroundStyle(TeleShieldDesign.muted)
                 .padding(.horizontal, 12)
                 List(client.blockRecords) { record in
-                    HStack(alignment: .top, spacing: 12) {
-                        Text(record.displayTime).font(.caption.monospaced()).frame(width: 175, alignment: .leading)
-                        Text(record.source == "group" ? "群組" : "私訊").font(.caption.bold()).foregroundStyle(record.source == "group" ? .orange : .blue).frame(width: 45, alignment: .leading)
-                        Text(record.userID).font(.caption.monospaced()).frame(width: 100, alignment: .leading)
-                        Text(record.name).font(.callout.weight(.medium)).frame(width: 150, alignment: .leading)
-                        Text(record.reason).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                    Button { selectedRecord = record } label: {
+                        HStack(alignment: .top, spacing: 12) {
+                            Text(record.displayTime).font(.caption.monospaced()).frame(width: 175, alignment: .leading)
+                            Text(record.source == "group" ? "群組" : "私訊")
+                                .font(.caption.bold())
+                                .foregroundStyle(record.source == "group" ? .orange : .blue)
+                                .frame(width: 45, alignment: .leading)
+                            Text(record.userID).font(.caption.monospaced()).frame(width: 100, alignment: .leading)
+                            Text(record.name).font(.callout.weight(.medium)).frame(width: 150, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(record.reason)
+                                    .font(.callout)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                                if let analysis = record.details?.analysis {
+                                    Text(analysis.score.map { score in
+                                        if let threshold = analysis.threshold {
+                                            return "\(analysis.analysisSourceLabel) · \(score) / \(threshold)"
+                                        }
+                                        return analysis.analysisSourceLabel
+                                    } ?? analysis.analysisSourceLabel)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer(minLength: 4)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 }
                 .listStyle(.inset)
             }
@@ -831,11 +858,94 @@ private struct BlockRecordsView: View {
         .teleShieldPageContent()
         .padding(TeleShieldDesign.pagePadding)
         .task(id: client.selectedAccountID) { await client.fetchBlockRecords(query: query, source: source) }
+        .sheet(item: $selectedRecord) { record in
+            BlockRecordDetailView(record: record)
+        }
     }
 
     private func export(_ format: String) {
         guard let url = savePanel(fileExtension: format, name: "teleShield-blocks.\(format)") else { return }
         Task { await client.exportBlocks(path: url.path, query: query, source: source, format: format) }
+    }
+}
+
+private struct BlockRecordDetailView: View {
+    let record: BlockRecord
+
+    private func joined(_ values: [String], fallback: String) -> String {
+        values.isEmpty ? fallback : values.joined(separator: "、")
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("封鎖詳情")
+                            .font(.title2.bold())
+                        Text(record.name.isEmpty ? record.userID : record.name)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(record.displayTime)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    LabeledContent("User ID", value: record.userID)
+                    LabeledContent("來源", value: record.source == "group" ? "群組" : "私訊")
+                    LabeledContent("封鎖原因", value: record.reason)
+                }
+
+                if let analysis = record.details?.analysis {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("分析結果")
+                            .font(.headline)
+                        LabeledContent(
+                            "分類",
+                            value: joined(analysis.categoryLabels, fallback: "未分類")
+                        )
+                        LabeledContent(
+                            "意圖",
+                            value: joined(
+                                analysis.intentLabels.isEmpty ? analysis.phishingLabels : analysis.intentLabels,
+                                fallback: "未分類"
+                            )
+                        )
+                        LabeledContent(
+                            "命中規則",
+                            value: joined(analysis.matchedRuleLabels, fallback: "未提供")
+                        )
+                        LabeledContent(
+                            "分數",
+                            value: analysis.score.flatMap { score in
+                                analysis.threshold.map { "\(score) / \($0)" }
+                            } ?? "不適用"
+                        )
+                        LabeledContent(
+                            "來源",
+                            value: analysis.analysisSourceLabel.isEmpty ? analysis.analysisSource : analysis.analysisSourceLabel
+                        )
+                        LabeledContent(
+                            "內容摘要",
+                            value: analysis.contentExcerpt.isEmpty ? "無" : analysis.contentExcerpt
+                        )
+                        if !analysis.senderContextLabels.isEmpty {
+                            LabeledContent("帳號狀態", value: analysis.senderContextLabels.joined(separator: "、"))
+                        }
+                    }
+                } else {
+                    Text("此筆為舊格式記錄，只有原始封鎖原因，沒有結構化分析資料。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(24)
+            .frame(minWidth: 520, alignment: .leading)
+        }
     }
 }
 

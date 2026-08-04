@@ -398,12 +398,69 @@ enum TimestampFormatter {
     }
 }
 
+struct BlockAnalysis: Codable {
+    let reasonCode: String
+    let categoryLabels: [String]
+    let intentLabels: [String]
+    let phishingLabels: [String]
+    let matchedRuleLabels: [String]
+    let score: Int?
+    let threshold: Int?
+    let analysisSource: String
+    let analysisSourceLabel: String
+    let contentExcerpt: String
+    let senderContextLabels: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case reasonCode = "reason_code"
+        case categoryLabels = "category_labels"
+        case intentLabels = "intent_labels"
+        case phishingLabels = "phishing_labels"
+        case matchedRuleLabels = "matched_rule_labels"
+        case score
+        case threshold
+        case analysisSource = "analysis_source"
+        case analysisSourceLabel = "analysis_source_label"
+        case contentExcerpt = "content_excerpt"
+        case senderContextLabels = "sender_context_labels"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        reasonCode = (try? container.decode(String.self, forKey: .reasonCode)) ?? ""
+        categoryLabels = (try? container.decode([String].self, forKey: .categoryLabels)) ?? []
+        intentLabels = (try? container.decode([String].self, forKey: .intentLabels)) ?? []
+        phishingLabels = (try? container.decode([String].self, forKey: .phishingLabels)) ?? []
+        matchedRuleLabels = (try? container.decode([String].self, forKey: .matchedRuleLabels)) ?? []
+        score = try? container.decode(Int.self, forKey: .score)
+        threshold = try? container.decode(Int.self, forKey: .threshold)
+        analysisSource = (try? container.decode(String.self, forKey: .analysisSource)) ?? ""
+        analysisSourceLabel = (try? container.decode(String.self, forKey: .analysisSourceLabel)) ?? ""
+        contentExcerpt = (try? container.decode(String.self, forKey: .contentExcerpt)) ?? ""
+        senderContextLabels = (try? container.decode([String].self, forKey: .senderContextLabels)) ?? []
+    }
+}
+
+struct BlockRecordDetails: Codable {
+    let analysis: BlockAnalysis?
+
+    enum CodingKeys: String, CodingKey {
+        case analysis
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        analysis = try? container.decode(BlockAnalysis.self, forKey: .analysis)
+    }
+}
+
 struct BlockRecord: Codable, Identifiable {
     let time: String
     let source: String
     let userID: String
     let name: String
     let reason: String
+    let details: BlockRecordDetails?
 
     var id: String { "\(time)-\(userID)-\(name)" }
     var displayTime: String { TimestampFormatter.localString(time) }
@@ -414,6 +471,7 @@ struct BlockRecord: Codable, Identifiable {
         case userID = "user_id"
         case name
         case reason
+        case details
     }
 
     init(from decoder: Decoder) throws {
@@ -429,6 +487,7 @@ struct BlockRecord: Codable, Identifiable {
         }
         name = (try? container.decode(String.self, forKey: .name)) ?? ""
         reason = (try? container.decode(String.self, forKey: .reason)) ?? ""
+        details = try? container.decode(BlockRecordDetails.self, forKey: .details)
     }
 }
 

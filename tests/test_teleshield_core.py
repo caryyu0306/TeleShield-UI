@@ -393,7 +393,10 @@ def test_realtime_first_message_blocks_homophone_without_url(monkeypatch, tmp_pa
     assert result is True
     assert FakeClient.block_requests == 1
     assert teleshield.load_config()["blocked_count"] == 1
-    assert teleshield.load_block_log()["blocks"][0]["reason"] == "偷資群組"
+    record = teleshield.load_block_log()["blocks"][0]
+    assert record["reason"] == "高信心垃圾訊息"
+    assert record["details"]["analysis"]["content_excerpt"] == "偷資群組"
+    assert record["details"]["analysis"]["category_labels"] == ["投資"]
 
 
 def test_private_history_policy_is_account_scoped_and_requires_successful_block(monkeypatch, tmp_path):
@@ -655,6 +658,37 @@ def test_block_notification_uses_the_selected_account_identity(monkeypatch, tmp_
     assert "帳號: Cary Yu (101)" not in second_message
 
 
+def test_structured_block_notification_uses_analysis_reason_and_dynamic_ids():
+    decision = teleshield.analyze_spam(
+        "投資穩賺，立即加入",
+        sender_context={"new_sender": True},
+    )
+    analysis = teleshield.build_block_analysis(
+        decision,
+        source="text",
+        evidence=decision["text"],
+        sender_context={"new_sender": True},
+    )
+
+    message = teleshield.build_telegram_block_notification(
+        134037075,
+        "Blocked User",
+        analysis["reason"],
+        None,
+        analysis=analysis,
+        account_cfg={"display_name": "Cary Yu", "user_id": 5668505643},
+    )
+
+    assert "帳號: Cary Yu (5668505643)" in message
+    assert "封鎖名稱: Blocked User (134037075)" in message
+    assert "封鎖原因：高信心垃圾訊息" in message
+    assert "分類：投資" in message
+    assert "意圖：獲利承諾、立即操作" in message
+    assert "分數：" in message
+    assert "來源：文字" in message
+    assert "內容摘要：投資穩賺，立即加入" in message
+
+
 def test_private_block_notification_includes_deletion_result(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     cfg = {
@@ -694,8 +728,9 @@ def test_private_block_notification_includes_deletion_result(monkeypatch, tmp_pa
     assert deletion == {"requested": True, "scope": "self", "succeeded": True}
     send.assert_called_once()
     message = send.call_args.args[2]
-    assert "封鎖名稱 & ID: Spam User (42)" in message
-    assert "封鎖原因: 投資穩賺，立即加入" in message
+    assert "封鎖名稱: Spam User (42)" in message
+    assert "封鎖原因：投資穩賺，立即加入" in message
+    assert "內容摘要：投資穩賺，立即加入" in message
     assert "是否開啟刪除對話: 是" in message
     assert "是否已經刪除對話: 是" in message
     record = teleshield.load_block_log()["blocks"][0]
@@ -860,6 +895,60 @@ def test_first_message_without_url_uses_content_and_sender_signals():
     assert decision["should_block"] is True
     assert decision["score"] >= decision["threshold"]
     assert {"guarantee", "contact"}.issubset(decision["intents"])
+
+
+def test_contact_regex_does_not_join_unrelated_ocr_english_words():
+    recognized = (
+        "編輯圖像\n取消\nMAKE A SPLASH!\nThe Waterproof Ball\n"
+        "Made for Summer\nPool days just got more exciting.\n"
+        "Float it. Fetch it. Splash all day.\n"
+        "SUMMER IS BETTER WITH PAWS & PLAY"
+    )
+
+    decision = teleshield.analyze_spam(
+        recognized,
+        sender_context={"new_sender": True},
+    )
+
+    assert decision["should_block"] is False
+    assert decision["score"] == 1
+    assert decision["intents"] == []
+    assert decision["obfuscation"] == []
+
+
+@pytest.mark.parametrize("recognized", ["tg @abc123", "telegram: abc123", "@abc1234"])
+def test_explicit_contact_handle_remains_high_confidence_for_new_sender(recognized):
+    decision = teleshield.analyze_spam(
+        recognized,
+        sender_context={"new_sender": True},
+    )
+
+    assert decision["should_block"] is True
+    assert decision["score"] >= decision["threshold"]
+    assert "contact" in decision["intents"]
+    assert any(
+        rule.get("confidence") == "contact_handle"
+        for rule in decision["matched_rules"]
+    )
+
+
+def test_block_analysis_separates_reason_from_ten_character_excerpt():
+    decision = teleshield.analyze_spam(
+        "投資穩賺，立即加入",
+        sender_context={"new_sender": True},
+    )
+    analysis = teleshield.build_block_analysis(
+        decision,
+        source="text",
+        evidence=decision["text"],
+        sender_context={"new_sender": True},
+    )
+
+    assert analysis["reason"] == "高信心垃圾訊息"
+    assert analysis["category_labels"] == ["投資"]
+    assert "獲利承諾" in analysis["intent_labels"]
+    assert "立即操作" in analysis["intent_labels"]
+    assert len(analysis["content_excerpt"]) <= 10
 
 
 @pytest.mark.parametrize(

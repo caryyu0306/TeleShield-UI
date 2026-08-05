@@ -987,8 +987,24 @@ private struct PrivacyAuditView: View {
                             .textSelection(.enabled)
                     }
                 } else if client.selectedAccount?.configured == true {
-                    ProgressView("正在讀取 Telegram 隱私設定…")
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 10) {
+                        if let errorMessage = client.errorMessage, !errorMessage.isEmpty {
+                            Label("隱私健檢讀取失敗", systemImage: "exclamationmark.triangle")
+                                .font(.headline)
+                                .foregroundStyle(TeleShieldDesign.warning)
+                            Text(errorMessage)
+                                .font(.callout)
+                                .foregroundStyle(TeleShieldDesign.danger)
+                                .textSelection(.enabled)
+                            Button("重試") {
+                                Task { await client.fetchPrivacyAudit() }
+                            }
+                            .disabled(client.isBusy)
+                        } else {
+                            ProgressView("正在讀取 Telegram 隱私設定…")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     TeleShieldEmptyState(
                         icon: "lock.shield",

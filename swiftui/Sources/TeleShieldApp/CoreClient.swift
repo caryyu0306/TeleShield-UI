@@ -444,6 +444,7 @@ final class CoreClient: ObservableObject {
     }
 
     func fetchPrivacyAudit(accountID: String? = nil) async {
+        errorMessage = nil
         do {
             guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {
                 privacyAudit = nil
@@ -456,6 +457,7 @@ final class CoreClient: ObservableObject {
             let nextAudit = try decodeResult(PrivacyAudit.self, from: data)
             guard selectedAccountID == targetAccountID else { return }
             privacyAudit = nextAudit
+            errorMessage = nil
         } catch { present(error: error) }
     }
 
@@ -1021,7 +1023,12 @@ final class CoreClient: ObservableObject {
 
     private func present(error: Error) {
         errorMessage = error.localizedDescription
-        connectionMessage = "sidecar 通訊失敗"
+        // RPC-level errors mean the sidecar is alive and returned a structured
+        // error (for example, a Telegram session lock). Do not present those
+        // as a broken IPC connection.
+        if process?.isRunning != true || !(error is CoreClientError) {
+            connectionMessage = "sidecar 通訊失敗"
+        }
         appendLog(error.localizedDescription, level: "error")
     }
 

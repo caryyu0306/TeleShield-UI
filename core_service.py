@@ -8,6 +8,7 @@ It never imports PySide6, so the frozen helper can be packaged without Qt.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import io
@@ -360,6 +361,46 @@ class CoreService:
             raise RuntimeError("請先停止此帳號的即時防護")
         if self._scan_is_running(account_id):
             raise RuntimeError("請先停止此帳號的歷史掃描")
+
+    @contextmanager
+    def _privacy_account_access(self, account_id: str | None):
+        """Temporarily release a listener's Session for account-level settings."""
+        if self._scan_is_running(account_id):
+            raise RuntimeError("請先停止此帳號的歷史掃描")
+
+        runtime = self._runtime(account_id)
+        was_running = bool(runtime and runtime.running)
+        if was_running:
+            stopped = self._stop_protection({"account_id": account_id})
+            if stopped.get("running"):
+                raise RuntimeError("無法暫停即時防護，請稍後再試")
+            self._emit_event({
+                "event": "log",
+                "level": "info",
+                "message": "隱私設定操作暫停即時防護，完成後會自動恢復。",
+            })
+
+        try:
+            yield
+        except BaseException:
+            if was_running:
+                try:
+                    self._start_protection({"account_id": account_id})
+                except Exception as exc:
+                    self._emit_event({
+                        "event": "log",
+                        "level": "error",
+                        "message": f"隱私設定操作後無法恢復即時防護：{exc}",
+                    })
+            raise
+        else:
+            if was_running:
+                try:
+                    self._start_protection({"account_id": account_id})
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"隱私設定已完成，但即時防護重新啟動失敗：{exc}"
+                    ) from exc
 
     def _safe_account_record(self, record: dict[str, Any]) -> dict[str, Any]:
         allowed = (
@@ -966,28 +1007,27 @@ class CoreService:
 
     def _get_privacy_audit(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        self._assert_account_idle(account_id)
         getter = getattr(self.core, "get_privacy_audit", None)
         if not callable(getter):
             raise InvalidRequestError("目前核心不支援隱私健檢")
-        return asyncio.run(getter(account_id=account_id))
+        with self._privacy_account_access(account_id):
+            return asyncio.run(getter(account_id=account_id))
 
     def _apply_privacy_profile(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        self._assert_account_idle(account_id)
         applier = getattr(self.core, "apply_privacy_profile", None)
         if not callable(applier):
             raise InvalidRequestError("目前核心不支援隱私設定調整")
-        return asyncio.run(
-            applier(
-                include_premium=self._coerce_bool(params.get("include_premium")),
-                account_id=account_id,
+        with self._privacy_account_access(account_id):
+            return asyncio.run(
+                applier(
+                    include_premium=self._coerce_bool(params.get("include_premium")),
+                    account_id=account_id,
+                )
             )
-        )
 
     def _update_privacy_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        self._assert_account_idle(account_id)
         updater = getattr(self.core, "update_privacy_settings", None)
         if not callable(updater):
             raise InvalidRequestError("目前核心不支援自訂隱私設定")
@@ -1000,32 +1040,32 @@ class CoreService:
         }
         if "username" in params:
             kwargs["username"] = str(params.get("username") or "")
-        return asyncio.run(updater(**kwargs))
+        with self._privacy_account_access(account_id):
+            return asyncio.run(updater(**kwargs))
 
     def _restore_privacy_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        self._assert_account_idle(account_id)
         restorer = getattr(self.core, "restore_privacy_settings", None)
         if not callable(restorer):
             raise InvalidRequestError("目前核心不支援隱私設定復原")
-        return asyncio.run(restorer(account_id=account_id))
+        with self._privacy_account_access(account_id):
+            return asyncio.run(restorer(account_id=account_id))
 
     def _revoke_authorization(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        self._assert_account_idle(account_id)
         session_hash = str(params.get("session_hash") or "").strip()
         if not session_hash:
             raise InvalidRequestError("session_hash 不可為空")
         revoker = getattr(self.core, "revoke_authorization", None)
         if not callable(revoker):
             raise InvalidRequestError("目前核心不支援撤銷 Telegram Session")
-        return asyncio.run(
-            revoker(session_hash=session_hash, account_id=account_id)
-        )
+        with self._privacy_account_access(account_id):
+            return asyncio.run(
+                revoker(session_hash=session_hash, account_id=account_id)
+            )
 
     def _update_two_factor(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
-        self._assert_account_idle(account_id)
         updater = getattr(self.core, "update_two_factor", None)
         if not callable(updater):
             raise InvalidRequestError("目前核心不支援兩步驟驗證")
@@ -1038,22 +1078,23 @@ class CoreService:
         ]
         with self._lock:
             self._sensitive_values.extend(sensitive_values)
-        try:
-            return asyncio.run(
-                updater(
-                    current_password=current_password,
-                    new_password=new_password,
-                    hint=hint,
-                    account_id=account_id,
+        with self._privacy_account_access(account_id):
+            try:
+                return asyncio.run(
+                    updater(
+                        current_password=current_password,
+                        new_password=new_password,
+                        hint=hint,
+                        account_id=account_id,
+                    )
                 )
-            )
-        finally:
-            with self._lock:
-                for value in sensitive_values:
-                    try:
-                        self._sensitive_values.remove(value)
-                    except ValueError:
-                        pass
+            finally:
+                with self._lock:
+                    for value in sensitive_values:
+                        try:
+                            self._sensitive_values.remove(value)
+                        except ValueError:
+                            pass
 
     def _start_async_job(
         self,

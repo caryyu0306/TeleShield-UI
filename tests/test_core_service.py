@@ -476,6 +476,26 @@ def test_privacy_rpc_is_account_scoped_and_preserves_premium_choice():
     ]
 
 
+def test_privacy_rpc_temporarily_pauses_active_listener():
+    core = FakePrivacyCore()
+    service = CoreService(core=core, platform=FakePlatform())
+    lifecycle = []
+
+    service._runtime = lambda _account_id: SimpleNamespace(running=True)
+    service._stop_protection = lambda params: (
+        lifecycle.append(("stop", params["account_id"])) or {"running": False}
+    )
+    service._start_protection = lambda params: (
+        lifecycle.append(("start", params["account_id"])) or {"running": True}
+    )
+
+    assert service.dispatch("get_privacy_audit", {"account_id": "account-a"}) == {
+        "account_id": "account-a",
+        "premium": False,
+    }
+    assert lifecycle == [("stop", "account-a"), ("start", "account-a")]
+
+
 def test_moderation_policy_rpc_is_explicitly_account_scoped():
     core = FakeParityCore()
     service = CoreService(core=core, platform=FakePlatform())

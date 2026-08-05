@@ -2654,6 +2654,121 @@ def test_running_listener_blocks_local_session_deletion(monkeypatch, tmp_path):
     assert not worker.is_alive()
 
 
+def test_privacy_audit_reuses_short_lived_cache(monkeypatch, tmp_path):
+    from telethon.tl import functions
+
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.save_config(
+        {"api_id": 1234, "api_hash": "api-hash", "user_id": 1},
+        account_id="account-a",
+    )
+
+    class FakeAuditClient:
+        def __init__(self):
+            self.calls = []
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_me(self):
+            return SimpleNamespace(id=1, username="alice", premium=False)
+
+        async def __call__(self, request):
+            self.calls.append(type(request).__name__)
+            if isinstance(request, functions.account.GetPrivacyRequest):
+                return SimpleNamespace(
+                    rules=[SimpleNamespace(__class__=SimpleNamespace)],
+                    users=[],
+                    chats=[],
+                )
+            if isinstance(request, functions.account.GetGlobalPrivacySettingsRequest):
+                return SimpleNamespace(
+                    archive_and_mute_new_noncontact_peers=False,
+                    keep_archived_unmuted=False,
+                    keep_archived_folders=False,
+                    hide_read_marks=False,
+                    new_noncontact_peers_require_premium=False,
+                    display_gifts_button=False,
+                    noncontact_peers_paid_stars=0,
+                    disallowed_gifts=None,
+                )
+            if isinstance(request, functions.account.GetPasswordRequest):
+                return SimpleNamespace(has_password=False, has_recovery=False, hint="")
+            if isinstance(request, functions.account.GetAuthorizationsRequest):
+                return SimpleNamespace(authorizations=[])
+            raise AssertionError(type(request).__name__)
+
+    client = FakeAuditClient()
+    monkeypatch.setattr(teleshield, "_privacy_client", lambda: client)
+
+    first = asyncio.run(teleshield.get_privacy_audit(account_id="account-a"))
+    first_call_count = len(client.calls)
+    second = asyncio.run(teleshield.get_privacy_audit(account_id="account-a"))
+
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert len(client.calls) == first_call_count
+    assert teleshield.load_privacy_audit_cache("account-a") is not None
+    archive_check = next(
+        check for check in first["checks"]
+        if check["id"] == "archive_and_mute_new_noncontact_peers"
+    )
+    assert archive_check["premium_required"] is True
+
+
+def test_privacy_audit_stops_after_flood_wait_instead_of_repeating_keys(monkeypatch, tmp_path):
+    from telethon.errors import FloodWaitError
+    from telethon.tl import functions
+
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.save_config(
+        {"api_id": 1234, "api_hash": "api-hash", "user_id": 1},
+        account_id="account-a",
+    )
+
+    class FloodingClient:
+        def __init__(self):
+            self.privacy_calls = 0
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_me(self):
+            return SimpleNamespace(id=1, username="alice", premium=False)
+
+        async def __call__(self, request):
+            if isinstance(request, functions.account.GetPrivacyRequest):
+                self.privacy_calls += 1
+                raise FloodWaitError(None, 95)
+            raise AssertionError(type(request).__name__)
+
+    client = FloodingClient()
+    monkeypatch.setattr(teleshield, "_privacy_client", lambda: client)
+
+    audit = asyncio.run(teleshield.get_privacy_audit(account_id="account-a"))
+
+    assert audit["rate_limited"] is True
+    assert audit["retry_after_seconds"] == 95
+    assert client.privacy_calls == 1
+    error_checks = [check for check in audit["checks"] if check.get("error")]
+    assert error_checks
+    assert all("95" in check["error"] for check in error_checks)
+
+
 def test_privacy_profile_gates_premium_and_restores_previous_settings(monkeypatch, tmp_path):
     from telethon.tl import functions, types
 

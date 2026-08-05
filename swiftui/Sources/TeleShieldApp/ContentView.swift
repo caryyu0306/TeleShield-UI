@@ -894,16 +894,6 @@ private struct BlockRecordsView: View {
 
 private struct PrivacyAuditView: View {
     @ObservedObject var client: CoreClient
-    @State private var showApplyConfirmation = false
-    @State private var showPremiumConfirmation = false
-    @State private var showRestoreConfirmation = false
-    @State private var showPremiumAlert = false
-    @State private var showTwoFactorSheet = false
-    @State private var pendingRevokeSession: PrivacySession?
-    @State private var actionError = ""
-    @State private var draftPrivacySettings: [PrivacyRuleSetting] = []
-    @State private var draftGlobalSettings = PrivacyGlobalSettings.defaults
-    @State private var draftUsername = ""
 
     var body: some View {
         ScrollView {
@@ -917,7 +907,7 @@ private struct PrivacyAuditView: View {
                     } label: {
                         Label("重新檢查", systemImage: "arrow.clockwise")
                     }
-                    .disabled(client.isBusy)
+                    .disabled(client.isBusy || client.privacyAuditLoading)
                 }
 
                 if let audit = client.privacyAudit {
@@ -926,25 +916,6 @@ private struct PrivacyAuditView: View {
                         MetricCard(title: "建議處理", value: "\(audit.warningCheckCount)", icon: "exclamationmark.shield")
                         MetricCard(title: "其他 Session", value: "\(audit.unknownSessionCount)", icon: "laptopcomputer.and.iphone")
                     }
-
-                    PrivacyAuditActionCard(
-                        audit: audit,
-                        isBusy: client.isBusy,
-                        onApplyFree: { showApplyConfirmation = true },
-                        onApplyPremium: { showPremiumConfirmation = true },
-                        onRestore: { showRestoreConfirmation = true }
-                    )
-
-                    PrivacySettingsEditor(
-                        settings: $draftPrivacySettings,
-                        globalSettings: $draftGlobalSettings,
-                        username: $draftUsername,
-                        checks: audit.checks,
-                        globalSettingsAvailable: audit.globalSettings != nil,
-                        isBusy: client.isBusy,
-                        onSave: { runCustomSettingsSave() },
-                        onReset: { syncDraft(from: audit) }
-                    )
 
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
@@ -955,6 +926,21 @@ private struct PrivacyAuditView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
+                        if audit.rateLimited {
+                            Label(
+                                "Telegram 暫時限流，以下顯示最近一次成功讀取；約 \(max(1, audit.retryAfterSeconds)) 秒後可重新檢查",
+                                systemImage: "clock.badge.exclamationmark"
+                            )
+                            .font(.callout)
+                            .foregroundStyle(TeleShieldDesign.warning)
+                        } else if audit.cached {
+                            Label(
+                                "為避免重複觸發 Telegram 限流，以下使用最近一次讀取結果；約 \(max(1, audit.retryAfterSeconds)) 秒後可重新檢查",
+                                systemImage: "clock.arrow.circlepath"
+                            )
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        }
                         ForEach(audit.checks) { check in
                             PrivacyCheckRow(check: check)
                         }
@@ -963,29 +949,12 @@ private struct PrivacyAuditView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .teleShieldSurface(radius: 14)
 
-                    PrivacyTwoFactorCard(audit: audit, isBusy: client.isBusy) {
-                        showTwoFactorSheet = true
-                    }
-
-                    PrivacySessionsCard(
-                        sessions: audit.sessions,
-                        isBusy: client.isBusy,
-                        onRevoke: { pendingRevokeSession = $0 }
-                    )
-
                     Label(
-                        "設定會透過 MTProto 同步到此 Telegram 帳號的其他已登入 Session；套用前會先保存目前設定，可從上方復原。",
+                        "這是一份唯讀建議報告；如需修改，請在 Telegram 官方的隱私與安全設定中手動調整。",
                         systemImage: "info.circle"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
-
-                    if !actionError.isEmpty {
-                        Text(actionError)
-                            .font(.callout)
-                            .foregroundStyle(TeleShieldDesign.danger)
-                            .textSelection(.enabled)
-                    }
                 } else if client.selectedAccount?.configured == true {
                     VStack(alignment: .leading, spacing: 10) {
                         if let errorMessage = client.errorMessage, !errorMessage.isEmpty {
@@ -999,7 +968,7 @@ private struct PrivacyAuditView: View {
                             Button("重試") {
                                 Task { await client.fetchPrivacyAudit() }
                             }
-                            .disabled(client.isBusy)
+                            .disabled(client.isBusy || client.privacyAuditLoading)
                         } else {
                             ProgressView("正在讀取 Telegram 隱私設定…")
                         }
@@ -1009,7 +978,7 @@ private struct PrivacyAuditView: View {
                     TeleShieldEmptyState(
                         icon: "lock.shield",
                         title: "請先登入 Telegram 帳號",
-                        message: "隱私健檢需要使用者 Session，登入後才能透過 MTProto 讀取與調整帳號級設定。"
+                        message: "隱私健檢需要使用者 Session，登入後才能透過 MTProto 讀取帳號級設定並提供建議。"
                     )
                 }
             }
@@ -1017,180 +986,8 @@ private struct PrivacyAuditView: View {
             .padding(TeleShieldDesign.pagePadding)
         }
         .task(id: client.selectedAccountID) {
-            actionError = ""
             await client.fetchPrivacyAudit()
-            syncDraft(from: client.privacyAudit)
         }
-        .onChange(of: client.privacyAudit?.generatedAt) { _ in
-            syncDraft(from: client.privacyAudit)
-        }
-        .confirmationDialog(
-            "套用免費版隱私建議？",
-            isPresented: $showApplyConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("確認套用") {
-                runPrivacyProfile(includePremium: false)
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("會依 Telegram 隱私與安全設定的建議調整各項規則，並保留目前的例外對象；套用前會保存目前設定。")
-        }
-        .confirmationDialog(
-            "套用 Premium 隱私建議？",
-            isPresented: $showPremiumConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("確認套用") {
-                runPrivacyProfile(includePremium: true)
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("除了免費版建議，也會啟用 Telegram 的「要求陌生人使用 Premium」設定。若此帳號未購買 Premium，將顯示帳號資格提示。")
-        }
-        .confirmationDialog(
-            "復原隱私設定？",
-            isPresented: $showRestoreConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("確認復原", role: .destructive) {
-                runRestore()
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("將嘗試還原套用建議前保存的 Telegram 隱私規則與全域隱私設定。")
-        }
-        .confirmationDialog(
-            "撤銷此 Telegram Session？",
-            isPresented: Binding(
-                get: { pendingRevokeSession != nil },
-                set: { if !$0 { pendingRevokeSession = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("撤銷 Session", role: .destructive) {
-                guard let session = pendingRevokeSession else { return }
-                pendingRevokeSession = nil
-                runRevoke(session)
-            }
-            Button("取消", role: .cancel) { pendingRevokeSession = nil }
-        } message: {
-            Text("撤銷後該裝置會被 Telegram 登出；目前正在使用的 Session 不會列出此操作。")
-        }
-        .alert("此帳號沒有購買 Telegram Premium", isPresented: $showPremiumAlert) {
-            Button("知道了", role: .cancel) {}
-        } message: {
-            Text("Premium 隱私功能只能由已購買 Telegram Premium 的帳號啟用；免費版隱私建議仍可單獨套用。")
-        }
-        .sheet(isPresented: $showTwoFactorSheet) {
-            if let audit = client.privacyAudit {
-                TwoFactorSettingsSheet(client: client, audit: audit)
-            }
-        }
-    }
-
-    private func runPrivacyProfile(includePremium: Bool) {
-        actionError = ""
-        Task {
-            let result = await client.applyPrivacyProfile(includePremium: includePremium)
-            handleActionResult(result)
-        }
-    }
-
-    private func runRestore() {
-        actionError = ""
-        Task {
-            let result = await client.restorePrivacySettings()
-            handleActionResult(result)
-        }
-    }
-
-    private func runCustomSettingsSave() {
-        actionError = ""
-        Task {
-            let result = await client.updatePrivacySettings(
-                settings: draftPrivacySettings,
-                globalSettings: draftGlobalSettings,
-                username: draftUsername
-            )
-            handleActionResult(result)
-        }
-    }
-
-    private func runRevoke(_ session: PrivacySession) {
-        actionError = ""
-        Task {
-            let result = await client.revokeAuthorization(sessionHash: session.hash)
-            handleActionResult(result)
-        }
-    }
-
-    private func handleActionResult(_ result: String?) {
-        guard let result, !result.isEmpty else { return }
-        if result.localizedCaseInsensitiveContains("premium") {
-            showPremiumAlert = true
-        } else {
-            actionError = result
-        }
-    }
-
-    private func syncDraft(from audit: PrivacyAudit?) {
-        guard let audit else { return }
-        draftPrivacySettings = audit.checks.compactMap(\.setting)
-        draftGlobalSettings = audit.globalSettings ?? .defaults
-        draftUsername = audit.username
-    }
-}
-
-private struct PrivacyAuditActionCard: View {
-    let audit: PrivacyAudit
-    let isBusy: Bool
-    let onApplyFree: () -> Void
-    let onApplyPremium: () -> Void
-    let onRestore: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(
-                        audit.premium ? "Telegram Premium 已啟用" : "Telegram Premium 未購買",
-                        systemImage: audit.premium ? "crown.fill" : "crown"
-                    )
-                    .font(.headline)
-                    .foregroundStyle(audit.premium ? .purple : TeleShieldDesign.warning)
-                    Text(audit.username.isEmpty ? "未設定公開 username" : "公開 username：@\(audit.username)")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if audit.backupAvailable {
-                    Label("有可復原備份", systemImage: "arrow.uturn.backward.circle")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.blue)
-                }
-            }
-
-            Text("可直接套用截圖中的建議規則，也可以在下方逐項調整主要規則、例外對象、全域設定與公開 username。")
-                .font(.callout)
-                .foregroundStyle(TeleShieldDesign.muted)
-
-            HStack(spacing: 10) {
-                Button("套用免費版建議", action: onApplyFree)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isBusy)
-                Button("套用 Premium 建議", action: onApplyPremium)
-                    .buttonStyle(.bordered)
-                    .disabled(isBusy)
-                if audit.backupAvailable {
-                    Button("復原套用前設定", role: .destructive, action: onRestore)
-                        .disabled(isBusy)
-                }
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .teleShieldSurface(radius: 14, fill: audit.premium ? Color.purple.opacity(0.08) : Color.orange.opacity(0.08))
     }
 }
 
@@ -1508,6 +1305,11 @@ private struct PrivacyCheckRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(check.title).font(.callout.weight(.semibold))
+                    if check.premiumRequired {
+                        Label("Premium", systemImage: "crown.fill")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.purple)
+                    }
                     Text(check.statusTitle)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(statusColor)

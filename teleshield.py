@@ -12,6 +12,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from copy import deepcopy
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -82,6 +83,7 @@ class AccountStore:
         self.block_log = Path(block_log or self.root / "block_log.json")
         self.learned_patterns_file = self.root / "learned_patterns.json"
         self.privacy_backup_file = self.root / "privacy_backup.json"
+        self.privacy_audit_cache_file = self.root / "privacy_audit_cache.json"
 
     def ensure(self) -> None:
         directories = [self.data_root]
@@ -100,6 +102,7 @@ class AccountStore:
             self.block_log,
             self.learned_patterns_file,
             self.privacy_backup_file,
+            self.privacy_audit_cache_file,
         ):
             if not path.exists():
                 continue
@@ -849,6 +852,7 @@ def ensure_account_registry(root: Optional[Path] = None) -> list:
         legacy.block_log,
         legacy.learned_patterns_file,
         legacy.privacy_backup_file,
+        legacy.privacy_audit_cache_file,
     ]
     if not any(path.exists() for path in sources):
         if registry["accounts"]:
@@ -889,6 +893,7 @@ def ensure_account_registry(root: Optional[Path] = None) -> list:
         target.block_log,
         target.learned_patterns_file,
         target.privacy_backup_file,
+        target.privacy_audit_cache_file,
     ]
     next_registry = {
         **registry,
@@ -1336,6 +1341,62 @@ def clear_privacy_backup(account_id: Optional[str] = None) -> None:
         pass
 
 
+PRIVACY_AUDIT_CACHE_VERSION = 1
+PRIVACY_AUDIT_CACHE_TTL_SECONDS = 120
+
+
+def _read_private_json(path: Path, fallback: Any = None) -> Any:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fallback
+    return data
+
+
+def load_privacy_audit_cache(account_id: Optional[str] = None) -> Optional[dict]:
+    cache_file = _resolve_account_store(account_id).privacy_audit_cache_file
+    data = _read_private_json(cache_file)
+    if not isinstance(data, dict):
+        return None
+    audit = data.get("audit")
+    snapshot = data.get("snapshot")
+    if not isinstance(audit, dict) or not isinstance(snapshot, dict):
+        return None
+    return data
+
+
+def save_privacy_audit_cache(
+    audit: dict,
+    snapshot: dict,
+    account_id: Optional[str] = None,
+) -> None:
+    if not isinstance(audit, dict) or not isinstance(snapshot, dict):
+        raise ValueError("隱私健檢快取格式無效")
+    cache_file = _resolve_account_store(account_id).privacy_audit_cache_file
+    cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write_private_bytes(
+        cache_file,
+        json.dumps(
+            {
+                "version": PRIVACY_AUDIT_CACHE_VERSION,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "audit": audit,
+                "snapshot": snapshot,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ).encode("utf-8"),
+    )
+
+
+def clear_privacy_audit_cache(account_id: Optional[str] = None) -> None:
+    cache_file = _resolve_account_store(account_id).privacy_audit_cache_file
+    try:
+        cache_file.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def get_learned_patterns(cfg: dict = None, account_id: Optional[str] = None) -> dict:
     cfg = cfg if cfg is not None else load_config(account_id)
     configured = cfg.get("learned_patterns", {}) if isinstance(cfg, dict) else {}
@@ -1647,7 +1708,7 @@ PRIVACY_RECOMMENDED_MODES = {
 _GLOBAL_PRIVACY_METADATA = {
     "archive_and_mute_new_noncontact_peers": {
         "title": "封存並靜音陌生人新對話",
-        "description": "自動處理非聯絡人的新對話，降低陌生人打擾。",
+        "description": "Telegram Premium 功能：自動封存並靜音非聯絡人的新對話。",
     },
     "keep_archived_unmuted": {
         "title": "保留未靜音的封存對話",
@@ -2142,8 +2203,39 @@ def _is_premium_privacy_error(exc: Exception) -> bool:
     )
 
 
+def _privacy_cache_saved_at(cache: Optional[dict]) -> Optional[datetime]:
+    if not isinstance(cache, dict):
+        return None
+    raw = cache.get("saved_at")
+    try:
+        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _privacy_cache_retry_after(cache: Optional[dict]) -> int:
+    saved_at = _privacy_cache_saved_at(cache)
+    if saved_at is None:
+        return 0
+    age = max(0.0, (datetime.now(timezone.utc) - saved_at).total_seconds())
+    return max(0, int(PRIVACY_AUDIT_CACHE_TTL_SECONDS - age))
+
+
+def _privacy_rate_limit_seconds(exc: Exception) -> int:
+    try:
+        return max(1, int(getattr(exc, "seconds", 0) or 0))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _privacy_rate_limit_message(seconds: int) -> str:
+    return f"Telegram 暫時限制隱私設定讀取，請約 {seconds} 秒後再檢查。"
+
+
 async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tuple[dict[str, Any], dict[str, Any], Any]:
     from telethon.tl import functions, types
+    from telethon.errors import FloodWaitError
 
     me = await client.get_me()
     premium = bool(getattr(me, "premium", False))
@@ -2157,6 +2249,7 @@ async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tu
         "username": "",
     }
     checks = []
+    privacy_rate_limit_seconds = None
 
     for item in PRIVACY_PROFILE_ITEMS:
         key_type = getattr(types, item["key"], None)
@@ -2185,6 +2278,26 @@ async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tu
                 exception_count=summary["exception_count"],
                 setting=setting,
             ))
+        except FloodWaitError as exc:
+            privacy_rate_limit_seconds = _privacy_rate_limit_seconds(exc)
+            error_message = _privacy_rate_limit_message(privacy_rate_limit_seconds)
+            checks.append(_privacy_check(
+                item["id"], item["title"], item["description"],
+                "Telegram 暫時限流", "稍後再檢查", "error", error=error_message,
+            ))
+            for remaining_item in PRIVACY_PROFILE_ITEMS[
+                PRIVACY_PROFILE_ITEMS.index(item) + 1:
+            ]:
+                checks.append(_privacy_check(
+                    remaining_item["id"],
+                    remaining_item["title"],
+                    remaining_item["description"],
+                    "等待重新讀取",
+                    "稍後再檢查",
+                    "error",
+                    error=error_message,
+                ))
+            break
         except Exception as exc:
             checks.append(_privacy_check(
                 item["id"], item["title"], item["description"],
@@ -2192,63 +2305,88 @@ async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tu
             ))
 
     global_settings = None
-    try:
-        global_settings = await client(functions.account.GetGlobalPrivacySettingsRequest())
-        global_snapshot = _serialize_global_privacy_settings(global_settings)
-        snapshot["global"] = global_snapshot
-        for field, metadata in _GLOBAL_PRIVACY_METADATA.items():
-            if field not in global_snapshot:
-                continue
-            value = global_snapshot[field]
-            if field == "noncontact_peers_paid_stars":
-                current_label = f"{int(value)} Stars" if int(value) > 0 else "未收費"
-                recommended_label = "0 Stars"
-                status = (
-                    "premium_required"
-                    if int(value) > 0 and not premium
-                    else ("ok" if int(value) == 0 else "warning")
-                )
-            else:
-                enabled = bool(value)
-                current_label = "已啟用" if enabled else "未啟用"
-                recommended_label = "依需求調整"
-                status = "premium_required" if (
-                    field == "new_noncontact_peers_require_premium" and enabled and not premium
-                ) else "ok"
-            checks.append(_privacy_check(
-                field,
-                metadata["title"],
-                metadata["description"],
-                current_label,
-                recommended_label,
-                status,
-                editable=True,
-                premium_required=(
-                    field == "new_noncontact_peers_require_premium"
-                    or (field == "noncontact_peers_paid_stars" and int(value) > 0)
-                ),
-            ))
-        disallowed_gifts = global_snapshot.get("disallowed_gifts")
-        if isinstance(disallowed_gifts, dict):
-            for field, title in _DISALLOWED_GIFT_METADATA.items():
-                if field not in disallowed_gifts:
-                    continue
-                checks.append(_privacy_check(
-                    f"gift_{field}",
-                    title,
-                    "控制可接受的 Telegram 禮物類型。",
-                    "已拒絕" if disallowed_gifts[field] else "未拒絕",
-                    "依需求調整",
-                    "ok",
-                    editable=True,
-                ))
-    except Exception as exc:
+    if privacy_rate_limit_seconds:
+        rate_limit_message = _privacy_rate_limit_message(privacy_rate_limit_seconds)
         checks.append(_privacy_check(
             "global_privacy_settings",
             "陌生人全域設定",
             "讀取 Telegram 全域隱私設定。",
-            "讀取失敗", "可檢查", "error", error=str(exc),
+            "等待重新讀取", "稍後再檢查", "error", error=rate_limit_message,
         ))
+    else:
+        try:
+            global_settings = await client(functions.account.GetGlobalPrivacySettingsRequest())
+            global_snapshot = _serialize_global_privacy_settings(global_settings)
+            snapshot["global"] = global_snapshot
+            for field, metadata in _GLOBAL_PRIVACY_METADATA.items():
+                if field not in global_snapshot:
+                    continue
+                value = global_snapshot[field]
+                if field == "noncontact_peers_paid_stars":
+                    current_label = f"{int(value)} Stars" if int(value) > 0 else "未收費"
+                    recommended_label = "0 Stars"
+                    status = (
+                        "premium_required"
+                        if int(value) > 0 and not premium
+                        else ("ok" if int(value) == 0 else "warning")
+                    )
+                else:
+                    enabled = bool(value)
+                    current_label = "已啟用" if enabled else "未啟用"
+                    recommended_label = "依需求調整"
+                    status = "premium_required" if (
+                        field in {
+                            "archive_and_mute_new_noncontact_peers",
+                            "new_noncontact_peers_require_premium",
+                        }
+                        and enabled
+                        and not premium
+                    ) else "ok"
+                checks.append(_privacy_check(
+                    field,
+                    metadata["title"],
+                    metadata["description"],
+                    current_label,
+                    recommended_label,
+                    status,
+                    editable=True,
+                    premium_required=(
+                        field == "archive_and_mute_new_noncontact_peers"
+                        or
+                        field == "new_noncontact_peers_require_premium"
+                        or (field == "noncontact_peers_paid_stars" and int(value) > 0)
+                    ),
+                ))
+            disallowed_gifts = global_snapshot.get("disallowed_gifts")
+            if isinstance(disallowed_gifts, dict):
+                for field, title in _DISALLOWED_GIFT_METADATA.items():
+                    if field not in disallowed_gifts:
+                        continue
+                    checks.append(_privacy_check(
+                        f"gift_{field}",
+                        title,
+                        "控制可接受的 Telegram 禮物類型。",
+                        "已拒絕" if disallowed_gifts[field] else "未拒絕",
+                        "依需求調整",
+                        "ok",
+                        editable=True,
+                    ))
+        except FloodWaitError as exc:
+            privacy_rate_limit_seconds = _privacy_rate_limit_seconds(exc)
+            checks.append(_privacy_check(
+                "global_privacy_settings",
+                "陌生人全域設定",
+                "讀取 Telegram 全域隱私設定。",
+                "Telegram 暫時限流", "稍後再檢查", "error",
+                error=_privacy_rate_limit_message(privacy_rate_limit_seconds),
+            ))
+        except Exception as exc:
+            checks.append(_privacy_check(
+                "global_privacy_settings",
+                "陌生人全域設定",
+                "讀取 Telegram 全域隱私設定。",
+                "讀取失敗", "可檢查", "error", error=str(exc),
+            ))
 
     username = str(getattr(me, "username", "") or "").strip()
     snapshot["username"] = username
@@ -2263,16 +2401,22 @@ async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tu
     ))
 
     two_factor = {"enabled": False, "recovery_configured": False, "hint": "", "error": None}
-    try:
-        password = await client(functions.account.GetPasswordRequest())
-        two_factor = {
-            "enabled": bool(getattr(password, "has_password", False)),
-            "recovery_configured": bool(getattr(password, "has_recovery", False)),
-            "hint": str(getattr(password, "hint", "") or ""),
-            "error": None,
-        }
-    except Exception as exc:
-        two_factor["error"] = str(exc)
+    if privacy_rate_limit_seconds:
+        two_factor["error"] = _privacy_rate_limit_message(privacy_rate_limit_seconds)
+    else:
+        try:
+            password = await client(functions.account.GetPasswordRequest())
+            two_factor = {
+                "enabled": bool(getattr(password, "has_password", False)),
+                "recovery_configured": bool(getattr(password, "has_recovery", False)),
+                "hint": str(getattr(password, "hint", "") or ""),
+                "error": None,
+            }
+        except FloodWaitError as exc:
+            privacy_rate_limit_seconds = _privacy_rate_limit_seconds(exc)
+            two_factor["error"] = _privacy_rate_limit_message(privacy_rate_limit_seconds)
+        except Exception as exc:
+            two_factor["error"] = str(exc)
     checks.append(_privacy_check(
         "two_step_verification",
         "兩步驟驗證",
@@ -2287,11 +2431,17 @@ async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tu
     authorizations = None
     sessions = []
     authorization_error = None
-    try:
-        authorizations = await client(functions.account.GetAuthorizationsRequest())
-        sessions = _serialize_authorizations(authorizations)
-    except Exception as exc:
-        authorization_error = str(exc)
+    if privacy_rate_limit_seconds:
+        authorization_error = _privacy_rate_limit_message(privacy_rate_limit_seconds)
+    else:
+        try:
+            authorizations = await client(functions.account.GetAuthorizationsRequest())
+            sessions = _serialize_authorizations(authorizations)
+        except FloodWaitError as exc:
+            privacy_rate_limit_seconds = _privacy_rate_limit_seconds(exc)
+            authorization_error = _privacy_rate_limit_message(privacy_rate_limit_seconds)
+        except Exception as exc:
+            authorization_error = str(exc)
     unknown_session_count = sum(1 for session in sessions if not session["current"])
     if authorization_error:
         checks.append(_privacy_check(
@@ -2327,6 +2477,14 @@ async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tu
         "sessions": sessions,
         "unknown_session_count": unknown_session_count,
         "backup_available": load_privacy_backup(account_id) is not None,
+        "cached": False,
+        "rate_limited": bool(privacy_rate_limit_seconds),
+        "retry_after_seconds": int(privacy_rate_limit_seconds or 0),
+        "cache_saved_at": generated_at,
+        "rate_limit_message": (
+            _privacy_rate_limit_message(privacy_rate_limit_seconds)
+            if privacy_rate_limit_seconds else None
+        ),
     }
     return audit, snapshot, global_settings
 
@@ -2392,7 +2550,27 @@ async def _restore_privacy_snapshot(client, snapshot: dict[str, Any]) -> None:
 
 
 async def _audit_with_client(client, account_id: Optional[str] = None) -> dict[str, Any]:
-    audit, _snapshot, _global_settings = await _collect_privacy_state(client, account_id)
+    audit, snapshot, _global_settings = await _collect_privacy_state(client, account_id)
+    if not audit.get("rate_limited"):
+        save_privacy_audit_cache(audit, snapshot, account_id)
+    return audit
+
+
+def _privacy_audit_from_cache(
+    cache: dict,
+    account_id: Optional[str] = None,
+    *,
+    rate_limited: bool = False,
+    retry_after_seconds: int = 0,
+    rate_limit_message: Optional[str] = None,
+) -> dict[str, Any]:
+    audit = deepcopy(cache.get("audit") or {})
+    audit["account_id"] = account_id
+    audit["cached"] = True
+    audit["rate_limited"] = rate_limited
+    audit["retry_after_seconds"] = max(0, int(retry_after_seconds or 0))
+    audit["cache_saved_at"] = str(cache.get("saved_at") or audit.get("generated_at") or "")
+    audit["rate_limit_message"] = rate_limit_message
     return audit
 
 
@@ -2403,13 +2581,13 @@ async def _update_privacy_settings_with_client(
 ) -> dict[str, Any]:
     if not isinstance(privacy_settings, dict):
         raise ValueError("隱私設定格式無效")
-    audit, snapshot, global_settings = await _collect_privacy_state(client, account_id)
     requested_privacy = privacy_settings.get("privacy", {})
     requested_global = privacy_settings.get("global", {})
     if not isinstance(requested_privacy, dict):
         raise ValueError("privacy 必須是 JSON object")
     if not isinstance(requested_global, dict):
         raise ValueError("global 必須是 JSON object")
+    audit, snapshot, global_settings = await _collect_privacy_state(client, account_id)
 
     item_by_id = {item["id"]: item for item in PRIVACY_PROFILE_ITEMS}
     unknown_privacy = set(requested_privacy) - set(item_by_id)
@@ -2491,19 +2669,46 @@ async def _update_privacy_settings_with_client(
             ) from exc
         raise
 
-    next_audit, _next_snapshot, _next_global = await _collect_privacy_state(client, account_id)
+    next_audit, next_snapshot, _next_global = await _collect_privacy_state(client, account_id)
     next_audit["backup_available"] = True
+    if not next_audit.get("rate_limited"):
+        save_privacy_audit_cache(next_audit, next_snapshot, account_id)
     return next_audit
 
 
 @_session_leased
 async def get_privacy_audit(account_id: Optional[str] = None) -> dict[str, Any]:
+    cache = load_privacy_audit_cache(account_id)
+    cache_retry_after = _privacy_cache_retry_after(cache)
+    if cache is not None and cache_retry_after > 0:
+        return _privacy_audit_from_cache(
+            cache,
+            account_id,
+            retry_after_seconds=cache_retry_after,
+        )
+
     client = _privacy_client()
     connected = False
     try:
         await _ensure_privacy_client_ready(client)
         connected = True
-        audit, _snapshot, _global_settings = await _collect_privacy_state(client, account_id)
+        audit, snapshot, _global_settings = await _collect_privacy_state(client, account_id)
+        if audit.get("rate_limited"):
+            previous_cache = load_privacy_audit_cache(account_id)
+            if previous_cache is not None:
+                retry_after = max(
+                    int(audit.get("retry_after_seconds") or 0),
+                    _privacy_cache_retry_after(previous_cache),
+                )
+                return _privacy_audit_from_cache(
+                    previous_cache,
+                    account_id,
+                    rate_limited=True,
+                    retry_after_seconds=retry_after,
+                    rate_limit_message=audit.get("rate_limit_message"),
+                )
+        else:
+            save_privacy_audit_cache(audit, snapshot, account_id)
         return audit
     finally:
         if connected:
@@ -2593,8 +2798,10 @@ async def restore_privacy_settings(account_id: Optional[str] = None) -> dict[str
             raise RuntimeError("找不到可還原的隱私設定備份")
         await _restore_privacy_snapshot(client, snapshot)
         clear_privacy_backup(account_id)
-        audit, _next_snapshot, _global_settings = await _collect_privacy_state(client, account_id)
+        audit, next_snapshot, _global_settings = await _collect_privacy_state(client, account_id)
         audit["backup_available"] = False
+        if not audit.get("rate_limited"):
+            save_privacy_audit_cache(audit, next_snapshot, account_id)
         return audit
     finally:
         if connected:

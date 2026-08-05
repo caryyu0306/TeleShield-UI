@@ -24,6 +24,7 @@ final class CoreClient: ObservableObject {
     @Published private(set) var learnedPatterns = LearnedPatterns.empty
     @Published private(set) var blockRecords: [BlockRecord] = []
     @Published private(set) var privacyAudit: PrivacyAudit?
+    @Published private(set) var privacyAuditLoading = false
     @Published private(set) var report: Report?
     @Published private(set) var scanSettings = ScanSettings.defaults
     @Published private(set) var moderationPolicy = ModerationPolicy.defaults
@@ -444,6 +445,9 @@ final class CoreClient: ObservableObject {
     }
 
     func fetchPrivacyAudit(accountID: String? = nil) async {
+        guard !privacyAuditLoading else { return }
+        privacyAuditLoading = true
+        defer { privacyAuditLoading = false }
         errorMessage = nil
         do {
             guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {

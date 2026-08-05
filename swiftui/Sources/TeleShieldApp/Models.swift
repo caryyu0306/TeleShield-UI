@@ -629,6 +629,11 @@ struct PrivacyAudit: Codable {
     let sessions: [PrivacySession]
     let unknownSessionCount: Int
     let backupAvailable: Bool
+    let cached: Bool
+    let rateLimited: Bool
+    let retryAfterSeconds: Int
+    let cacheSavedAt: String
+    let rateLimitMessage: String?
 
     var healthyCheckCount: Int { checks.filter(\.isHealthy).count }
     var warningCheckCount: Int { checks.filter { !$0.isHealthy }.count }
@@ -647,6 +652,11 @@ struct PrivacyAudit: Codable {
         case sessions
         case unknownSessionCount = "unknown_session_count"
         case backupAvailable = "backup_available"
+        case cached
+        case rateLimited = "rate_limited"
+        case retryAfterSeconds = "retry_after_seconds"
+        case cacheSavedAt = "cache_saved_at"
+        case rateLimitMessage = "rate_limit_message"
     }
 
     init(from decoder: Decoder) throws {
@@ -664,6 +674,11 @@ struct PrivacyAudit: Codable {
         sessions = (try? container.decode([PrivacySession].self, forKey: .sessions)) ?? []
         unknownSessionCount = (try? container.decode(Int.self, forKey: .unknownSessionCount)) ?? 0
         backupAvailable = (try? container.decode(Bool.self, forKey: .backupAvailable)) ?? false
+        cached = (try? container.decode(Bool.self, forKey: .cached)) ?? false
+        rateLimited = (try? container.decode(Bool.self, forKey: .rateLimited)) ?? false
+        retryAfterSeconds = (try? container.decode(Int.self, forKey: .retryAfterSeconds)) ?? 0
+        cacheSavedAt = (try? container.decode(String.self, forKey: .cacheSavedAt)) ?? ""
+        rateLimitMessage = try? container.decode(String.self, forKey: .rateLimitMessage)
     }
 }
 

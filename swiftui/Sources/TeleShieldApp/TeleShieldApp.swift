@@ -3,6 +3,7 @@ import SwiftUI
 
 extension Notification.Name {
     static let teleShieldOpenMainWindow = Notification.Name("TeleShieldOpenMainWindow")
+    static let teleShieldShowUpdate = Notification.Name("TeleShieldShowUpdate")
 }
 
 final class TeleShieldAppDelegate: NSObject, NSApplicationDelegate {
@@ -30,10 +31,11 @@ final class TeleShieldAppDelegate: NSObject, NSApplicationDelegate {
 struct TeleShieldApp: App {
     @NSApplicationDelegateAdaptor(TeleShieldAppDelegate.self) private var appDelegate
     @StateObject private var client = CoreClient()
+    @StateObject private var updater = UpdateManager()
 
     var body: some Scene {
         WindowGroup("TeleShield", id: "main") {
-            ContentView(client: client)
+            ContentView(client: client, updater: updater)
         }
         .commands {
             CommandGroup(replacing: .appTermination) {
@@ -46,8 +48,7 @@ struct TeleShieldApp: App {
         }
 
         MenuBarExtra("TeleShield", systemImage: "shield.lefthalf.filled") {
-            MenuBarView(client: client)
+            MenuBarView(client: client, updater: updater)
         }
     }
 }
-

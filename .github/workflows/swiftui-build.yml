@@ -1,13 +1,27 @@
-name: SwiftUI test builds
+name: SwiftUI CI builds
 
 on:
   workflow_dispatch:
   pull_request:
     branches:
       - main
+    paths:
+      - 'swiftui/**'
+      - 'scripts/**'
+      - '**.py'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - '.github/workflows/**'
   push:
     branches:
       - main
+    paths:
+      - 'swiftui/**'
+      - 'scripts/**'
+      - '**.py'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - '.github/workflows/**'
 
 permissions:
   contents: read
@@ -43,10 +57,12 @@ jobs:
             expected_arch: x86_64
             artifact_name: macOS-intel-swiftui
             file_name: macOS-intel-swiftui.dmg
+            zip_file_name: macOS-intel-swiftui.zip
           - runner: macos-14
             expected_arch: arm64
             artifact_name: macOS-arm-swiftui
             file_name: macOS-arm-swiftui.dmg
+            zip_file_name: macOS-arm-swiftui.zip
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -78,15 +94,19 @@ jobs:
           APP="dist/TeleShieldSwiftUI.app"
           CORE="$APP/Contents/Helpers/TeleShieldCore/TeleShieldCore"
           OCR="$APP/Contents/Helpers/TeleShieldCore/VisionOCR"
+          UPDATER="$APP/Contents/Helpers/TeleShieldUpdater"
           app_arch="$(lipo -archs "$APP/Contents/MacOS/TeleShieldApp")"
           helper_arch="$(lipo -archs "$CORE")"
           ocr_arch="$(lipo -archs "$OCR")"
+          updater_arch="$(lipo -archs "$UPDATER")"
           echo "SwiftUI app architecture: $app_arch"
           echo "Sidecar architecture: $helper_arch"
           echo "Vision OCR architecture: $ocr_arch"
+          echo "Update helper architecture: $updater_arch"
           test "$app_arch" = "$EXPECTED_ARCH"
           test "$helper_arch" = "$EXPECTED_ARCH"
           test "$ocr_arch" = "$EXPECTED_ARCH"
+          test "$updater_arch" = "$EXPECTED_ARCH"
           "$CORE" --self-test
           "$OCR" --self-test > "${RUNNER_TEMP}/vision-ocr-self-test.json"
           OCR_FIXTURE="${RUNNER_TEMP}/teleshield-ocr-fixture.png"
@@ -138,10 +158,20 @@ jobs:
             -format UDZO \
             "dist/${{ matrix.file_name }}"
           stat -f 'DMG bytes: %z' "dist/${{ matrix.file_name }}"
-      - name: Upload SwiftUI DMG artifact
+      - name: Create OTA ZIP
+        run: |
+          mkdir -p "dist/zip-root"
+          cp -R "dist/TeleShieldSwiftUI.app" "dist/zip-root/TeleShield.app"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/zip-root/TeleShield.app" \
+            "dist/${{ matrix.zip_file_name }}"
+          stat -f 'ZIP bytes: %z' "dist/${{ matrix.zip_file_name }}"
+      - name: Upload SwiftUI test artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.file_name }}
+          path: |
+            dist/${{ matrix.file_name }}
+            dist/${{ matrix.zip_file_name }}
           if-no-files-found: error
           retention-days: 14

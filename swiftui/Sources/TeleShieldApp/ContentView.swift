@@ -36,8 +36,10 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
 
 struct ContentView: View {
     @ObservedObject var client: CoreClient
+    @ObservedObject var updater: UpdateManager
     @State private var section: AppSection? = .overview
     @State private var showLogin = false
+    @State private var showUpdateSheet = false
     @State private var temporaryLoginAccountID: String?
 
     var body: some View {
@@ -58,7 +60,11 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 1080, minHeight: 700)
-        .onAppear { client.launch() }
+        .onAppear {
+            client.launch()
+            updater.startAutomaticChecks()
+            showUpdateSheet = updater.availableUpdate != nil
+        }
         .task {
             while !Task.isCancelled {
                 await client.refresh()
@@ -67,6 +73,11 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showLogin) {
             LoginSheet(client: client, temporaryAccountID: $temporaryLoginAccountID)
+        }
+        .sheet(isPresented: $showUpdateSheet) {
+            if let update = updater.availableUpdate {
+                UpdateSheet(client: client, updater: updater, update: update)
+            }
         }
         .onChange(of: client.authenticatedAccountID) { accountID in
             let targetAccountID = temporaryLoginAccountID ?? client.selectedAccountID
@@ -77,6 +88,12 @@ struct ContentView: View {
             ) else { return }
             temporaryLoginAccountID = nil
             showLogin = false
+        }
+        .onChange(of: updater.availableUpdate) { update in
+            if update != nil { showUpdateSheet = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .teleShieldShowUpdate)) { _ in
+            showUpdateSheet = updater.availableUpdate != nil
         }
     }
 
@@ -154,7 +171,7 @@ struct ContentView: View {
         case .rules: RulesView(client: client)
         case .reports: ReportView(client: client)
         case .records: BlockRecordsView(client: client)
-        case .settings: GlobalSettingsView(client: client)
+        case .settings: GlobalSettingsView(client: client, updater: updater)
         case .accounts: AccountsView(client: client, showLogin: $showLogin)
         }
     }
@@ -961,6 +978,7 @@ private struct BlockRecordDetailView: View {
 
 private struct GlobalSettingsView: View {
     @ObservedObject var client: CoreClient
+    @ObservedObject var updater: UpdateManager
 
     var body: some View {
         Form {
@@ -1015,6 +1033,52 @@ private struct GlobalSettingsView: View {
                     Button("重新檢查") { Task { await client.refreshOCR() } }
                 }
             }
+            Section("軟體更新") {
+                VStack(alignment: .leading, spacing: 12) {
+                    LabeledContent("目前版本", value: updater.currentVersion.description)
+                    HStack {
+                        Label(
+                            updater.statusMessage,
+                            systemImage: updater.availableUpdate == nil ? "checkmark.circle" : "arrow.down.circle"
+                        )
+                        .foregroundStyle(updater.availableUpdate == nil ? Color.secondary : Color.blue)
+                        Spacer()
+                        Button("檢查更新") {
+                            Task { await updater.checkForUpdates() }
+                        }
+                        .disabled(updater.isChecking || updater.isDownloading)
+                    }
+                    Toggle(
+                        "自動檢查更新",
+                        isOn: Binding(
+                            get: { updater.automaticChecksEnabled },
+                            set: { updater.setAutomaticChecksEnabled($0) }
+                        )
+                    )
+                    if let update = updater.availableUpdate {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("發現新版本 \(update.version.description)")
+                                .font(.headline)
+                            Text("目前架構：\(update.architecture)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("查看更新") {
+                                NotificationCenter.default.post(name: .teleShieldShowUpdate, object: nil)
+                            }
+                        }
+                    }
+                    if let checkedAt = updater.lastCheckedAt {
+                        Text("上次檢查：\(checkedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let error = updater.lastError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .padding(20)
@@ -1037,6 +1101,85 @@ private struct GlobalSettingsView: View {
         }
         let orderedIDs = (client.status?.accounts ?? []).map(\.id).filter { ids.contains($0) }
         Task { await client.setAutoStartAccounts(accountIDs: orderedIDs) }
+    }
+}
+
+private struct UpdateSheet: View {
+    @ObservedObject var client: CoreClient
+    @ObservedObject var updater: UpdateManager
+    let update: AppUpdate
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("有可用更新", systemImage: "arrow.down.circle.fill")
+                        .font(.title2.bold())
+                        .foregroundStyle(.blue)
+                    Text("TeleShield \(update.version.description)")
+                        .font(.headline)
+                }
+                Spacer()
+                Button("稍後") { dismiss() }
+            }
+
+            Divider()
+
+            Text(update.releaseNotes.isEmpty ? "此版本沒有提供發布說明。" : update.releaseNotes)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+
+            Text("更新檔：\(update.fileName)（\(update.architecture)）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if client.hasActiveScan {
+                Label(
+                    "目前有歷史掃描正在執行，請先完成或取消掃描再更新。",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.callout)
+                .foregroundStyle(.orange)
+            }
+
+            if let error = updater.lastError {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                if let releaseURL = update.releaseURL {
+                    Link("查看 GitHub Release", destination: releaseURL)
+                        .font(.callout)
+                }
+                Spacer()
+                if updater.isDownloading {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在準備更新…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button("下載並更新") {
+                        Task {
+                            do {
+                                try await updater.downloadAndInstall(update) {
+                                    await client.shutdownGracefully()
+                                }
+                            } catch {
+                                // UpdateManager publishes the user-facing error.
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(client.hasActiveScan || updater.isChecking)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
     }
 }
 
@@ -1778,6 +1921,7 @@ private struct EmptyPanel: View {
 
 struct MenuBarView: View {
     @ObservedObject var client: CoreClient
+    @ObservedObject var updater: UpdateManager
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -1797,6 +1941,18 @@ struct MenuBarView: View {
                 .disabled(client.isBusy)
                 Button("重新整理") { Task { await client.refresh() } }
             }
+            Divider()
+            if let update = updater.availableUpdate {
+                Button("有可用更新：v\(update.version.description)") {
+                    NotificationCenter.default.post(name: .teleShieldShowUpdate, object: nil)
+                    openMainWindow()
+                }
+                .foregroundStyle(.blue)
+            }
+            Button("檢查更新…") {
+                Task { await updater.checkForUpdates() }
+            }
+            .disabled(updater.isChecking || updater.isDownloading)
             Button("結束 TeleShield") {
                 Task {
                     await client.shutdownGracefully()
@@ -1806,6 +1962,7 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 230)
+        .onAppear { updater.startAutomaticChecks() }
         .onReceive(NotificationCenter.default.publisher(for: .teleShieldOpenMainWindow)) { _ in
             openMainWindow()
         }

@@ -1341,7 +1341,10 @@ def clear_privacy_backup(account_id: Optional[str] = None) -> None:
         pass
 
 
-PRIVACY_AUDIT_CACHE_VERSION = 1
+# Increment when the audit schema or the set of user-facing checks changes.
+# This invalidates caches created before the paid-message exception key was
+# removed from the report.
+PRIVACY_AUDIT_CACHE_VERSION = 2
 PRIVACY_AUDIT_CACHE_TTL_SECONDS = 120
 
 
@@ -1357,6 +1360,8 @@ def load_privacy_audit_cache(account_id: Optional[str] = None) -> Optional[dict]
     cache_file = _resolve_account_store(account_id).privacy_audit_cache_file
     data = _read_private_json(cache_file)
     if not isinstance(data, dict):
+        return None
+    if data.get("version") != PRIVACY_AUDIT_CACHE_VERSION:
         return None
     audit = data.get("audit")
     snapshot = data.get("snapshot")
@@ -1626,12 +1631,6 @@ PRIVACY_PROFILE_ITEMS = (
         "description": "限制陌生人查看你的生日。",
     },
     {
-        "id": "no_paid_messages",
-        "key": "InputPrivacyKeyNoPaidMessages",
-        "title": "付費訊息",
-        "description": "控制哪些人可以向你發送需要 Telegram Stars 的付費訊息。",
-    },
-    {
         "id": "saved_music",
         "key": "InputPrivacyKeySavedMusic",
         "title": "儲存的音樂",
@@ -1700,7 +1699,6 @@ PRIVACY_RECOMMENDED_MODES = {
     "voice_messages": "allow_all",
     "about": "allow_all",
     "birthday": "disallow_all",
-    "no_paid_messages": "allow_all",
     "saved_music": "disallow_all",
     "star_gifts_auto_save": "allow_all",
 }
@@ -1731,8 +1729,8 @@ _GLOBAL_PRIVACY_METADATA = {
         "description": "在個人檔案顯示送禮入口。",
     },
     "noncontact_peers_paid_stars": {
-        "title": "陌生人付費訊息",
-        "description": "設定非聯絡人傳送訊息所需的 Telegram Stars；0 代表不收費。",
+        "title": "陌生人付費訊息（Premium）",
+        "description": "Telegram Premium 專屬：設定非聯絡人傳送訊息所需的 Telegram Stars；0 代表未啟用。",
     },
 }
 
@@ -2324,7 +2322,11 @@ async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tu
                 value = global_snapshot[field]
                 if field == "noncontact_peers_paid_stars":
                     current_label = f"{int(value)} Stars" if int(value) > 0 else "未收費"
-                    recommended_label = "0 Stars"
+                    recommended_label = (
+                        "0 Stars"
+                        if premium
+                        else "Premium 帳號才可調整"
+                    )
                     status = (
                         "premium_required"
                         if int(value) > 0 and not premium
@@ -2354,7 +2356,7 @@ async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tu
                         field == "archive_and_mute_new_noncontact_peers"
                         or
                         field == "new_noncontact_peers_require_premium"
-                        or (field == "noncontact_peers_paid_stars" and int(value) > 0)
+                        or field == "noncontact_peers_paid_stars"
                     ),
                 ))
             disallowed_gifts = global_snapshot.get("disallowed_gifts")

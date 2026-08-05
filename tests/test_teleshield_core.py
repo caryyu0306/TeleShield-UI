@@ -2721,6 +2721,13 @@ def test_privacy_audit_reuses_short_lived_cache(monkeypatch, tmp_path):
         if check["id"] == "archive_and_mute_new_noncontact_peers"
     )
     assert archive_check["premium_required"] is True
+    assert not any(check["id"] == "no_paid_messages" for check in first["checks"])
+    paid_check = next(
+        check for check in first["checks"]
+        if check["id"] == "noncontact_peers_paid_stars"
+    )
+    assert paid_check["premium_required"] is True
+    assert paid_check["status"] == "ok"
 
 
 def test_privacy_audit_stops_after_flood_wait_instead_of_repeating_keys(monkeypatch, tmp_path):

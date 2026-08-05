@@ -919,7 +919,7 @@ private struct PrivacyAuditView: View {
 
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Text("隱私設定檢查")
+                            Text("隱私設定建議（唯讀）")
                                 .font(.headline)
                             Spacer()
                             Text("讀取時間：\(TimestampFormatter.localString(audit.generatedAt))")
@@ -1277,6 +1277,16 @@ private struct PrivacyGlobalSettingsEditor: View {
 private struct PrivacyCheckRow: View {
     let check: PrivacyCheck
 
+    private var recommendationText: String {
+        if check.premiumRequired {
+            if check.status == "premium_required" {
+                return "Premium 專屬；目前帳號無法調整"
+            }
+            return "Premium 專屬；\(check.recommended)"
+        }
+        return "Telegram 官方設定：\(check.recommended)"
+    }
+
     private var statusColor: Color {
         switch check.status {
         case "ok": return TeleShieldDesign.success
@@ -1335,7 +1345,7 @@ private struct PrivacyCheckRow: View {
                     .font(.callout.weight(.medium))
                     .multilineTextAlignment(.trailing)
                 if !check.isHealthy && !check.recommended.isEmpty {
-                    Text("建議：\(check.recommended)")
+                    Text(recommendationText)
                         .font(.caption)
                         .foregroundStyle(statusColor)
                         .multilineTextAlignment(.trailing)

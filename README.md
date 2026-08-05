@@ -168,6 +168,14 @@ OCR 讀到的文字也會經過同樣的繁簡、拼音、注音、骨架和導�
 
 這些功能失敗時，不會影響原本的封鎖結果。
 
+## 隱私健檢
+
+「工作區 → 隱私健檢」會透過 Telegram 使用者 Session 的 MTProto API 讀取帳號級隱私設定，檢查最後上線時間、群組邀請、通話、轉發、頭像、電話號碼、username、兩步驟驗證與其他登入中的裝置。
+
+- 可先檢視目前設定，再套用免費版隱私建議；套用前會保存原設定，之後可以復原。
+- Premium 建議會額外啟用 Telegram 的「要求陌生人使用 Premium」控制；未購買 Premium 的帳號選擇此功能時，App 會顯示帳號資格提示。
+- 兩步驟驗證密碼只會暫時傳送給 Telegram，不會寫入 TeleShield 設定檔或備份。撤銷 Session 前請確認裝置確實不再需要登入。
+
 ## 開始使用
 
 ### 需要什麼？
@@ -194,7 +202,7 @@ TeleShield 會從公開 GitHub Release 檢查穩定版更新，不會監控 GitH
 
 此 fork 目前仍發布未簽署的測試版，因此第一次安裝可能需要依照下方說明移除 quarantine。OTA 不需要 Apple Developer 付費帳號，但未簽署 App 不具備 Developer ID 與 Apple notarization 的完整 Gatekeeper 信任。
 
-正式發布流程是：先透過 Pull Request 測試並合併到 `main`，再在 GitHub Releases 網頁建立例如 `v1.3.0` 的 tag、選擇 `main` 為 Target，按 **Generate release notes** 後發布。GitHub Actions 會以該 Release tag 建置 Intel 與 Apple Silicon 版本，並上傳 DMG、OTA ZIP 與 `manifest.json`。
+正式發布流程是：先透過 Pull Request 測試並合併到 `main`，再在 GitHub Releases 網頁建立例如 `v1.3.1` 的 tag、選擇 `main` 為 Target，按 **Generate release notes** 後發布。GitHub Actions 會以該 Release tag 建置 Intel 與 Apple Silicon 版本，並上傳 DMG、OTA ZIP 與 `manifest.json`。
 
 ### macOS 阻擋 App 開啟時
 

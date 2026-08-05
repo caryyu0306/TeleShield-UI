@@ -2652,3 +2652,98 @@ def test_running_listener_blocks_local_session_deletion(monkeypatch, tmp_path):
         release.set()
         worker.join(15)
     assert not worker.is_alive()
+
+
+def test_privacy_profile_gates_premium_and_restores_previous_settings(monkeypatch, tmp_path):
+    from telethon.tl import functions, types
+
+    configure_temp_storage(monkeypatch, tmp_path)
+    teleshield.create_account("account-a")
+    teleshield.save_config(
+        {"api_id": 1234, "api_hash": "api-hash", "user_id": 1},
+        account_id="account-a",
+    )
+
+    class FakePrivacyClient:
+        def __init__(self):
+            self.privacy_writes = 0
+            self.privacy_write_types = []
+            self.global_writes = 0
+            self.global_settings = types.GlobalPrivacySettings(
+                archive_and_mute_new_noncontact_peers=False,
+                new_noncontact_peers_require_premium=False,
+            )
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_me(self):
+            return types.User(id=1, is_self=True, username="alice", premium=False)
+
+        async def __call__(self, request):
+            if isinstance(request, functions.account.GetPrivacyRequest):
+                return types.account.PrivacyRules(
+                    rules=[types.PrivacyValueAllowAll()],
+                    chats=[],
+                    users=[],
+                )
+            if isinstance(request, functions.account.SetPrivacyRequest):
+                self.privacy_writes += 1
+                self.privacy_write_types.append(type(request.rules[0]))
+                return None
+            if isinstance(request, functions.account.GetGlobalPrivacySettingsRequest):
+                return self.global_settings
+            if isinstance(request, functions.account.SetGlobalPrivacySettingsRequest):
+                self.global_writes += 1
+                self.global_settings = request.settings
+                return None
+            if isinstance(request, functions.account.GetPasswordRequest):
+                return SimpleNamespace(has_password=False, has_recovery=False, hint="")
+            if isinstance(request, functions.account.GetAuthorizationsRequest):
+                return types.account.Authorizations(
+                    authorization_ttl_days=365,
+                    authorizations=[types.Authorization(
+                        hash=1,
+                        device_model="Mac",
+                        platform="macOS",
+                        system_version="14",
+                        api_id=1234,
+                        app_name="TeleShield",
+                        app_version="1.3.1",
+                        date_created=None,
+                        date_active=datetime.now(timezone.utc),
+                        ip="127.0.0.1",
+                        country="TW",
+                        region="TW",
+                        current=True,
+                        official_app=False,
+                    )],
+                )
+            raise AssertionError(type(request).__name__)
+
+    client = FakePrivacyClient()
+    monkeypatch.setattr(teleshield, "_privacy_client", lambda: client)
+
+    with pytest.raises(teleshield.PremiumAccountRequiredError, match="沒有購買 Telegram Premium"):
+        asyncio.run(teleshield.apply_privacy_profile(True, account_id="account-a"))
+    assert client.privacy_writes == 0
+    assert teleshield.load_privacy_backup("account-a") is None
+
+    applied = asyncio.run(teleshield.apply_privacy_profile(False, account_id="account-a"))
+    assert applied["backup_available"] is True
+    assert client.privacy_writes == len(teleshield.PRIVACY_PROFILE_ITEMS)
+    assert all(
+        write_type is types.InputPrivacyValueAllowContacts
+        for write_type in client.privacy_write_types
+    )
+    assert teleshield.load_privacy_backup("account-a") is not None
+
+    restored = asyncio.run(teleshield.restore_privacy_settings(account_id="account-a"))
+    assert restored["backup_available"] is False
+    assert teleshield.load_privacy_backup("account-a") is None

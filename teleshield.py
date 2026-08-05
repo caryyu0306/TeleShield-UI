@@ -81,6 +81,7 @@ class AccountStore:
         self.config_file = Path(config_file or self.root / "config.json")
         self.block_log = Path(block_log or self.root / "block_log.json")
         self.learned_patterns_file = self.root / "learned_patterns.json"
+        self.privacy_backup_file = self.root / "privacy_backup.json"
 
     def ensure(self) -> None:
         directories = [self.data_root]
@@ -98,6 +99,7 @@ class AccountStore:
             self.config_file,
             self.block_log,
             self.learned_patterns_file,
+            self.privacy_backup_file,
         ):
             if not path.exists():
                 continue
@@ -147,6 +149,10 @@ def normalize_traditional(text: str) -> str:
 
 class AccountSessionBusyError(RuntimeError):
     """Raised when another operation owns an account's Telegram Session."""
+
+
+class PremiumAccountRequiredError(RuntimeError):
+    """Raised when a Telegram account-only Premium setting is requested."""
 
 
 def _account_session_mutex(key: str):
@@ -842,6 +848,7 @@ def ensure_account_registry(root: Optional[Path] = None) -> list:
         legacy.config_file,
         legacy.block_log,
         legacy.learned_patterns_file,
+        legacy.privacy_backup_file,
     ]
     if not any(path.exists() for path in sources):
         if registry["accounts"]:
@@ -881,6 +888,7 @@ def ensure_account_registry(root: Optional[Path] = None) -> list:
         target.config_file,
         target.block_log,
         target.learned_patterns_file,
+        target.privacy_backup_file,
     ]
     next_registry = {
         **registry,
@@ -1298,6 +1306,36 @@ def save_learned_patterns(data, account_id: Optional[str] = None):
     )
 
 
+def load_privacy_backup(account_id: Optional[str] = None) -> Optional[dict]:
+    backup_file = _resolve_account_store(account_id).privacy_backup_file
+    if not backup_file.exists():
+        return None
+    try:
+        data = json.loads(backup_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_privacy_backup(data: dict, account_id: Optional[str] = None) -> None:
+    if not isinstance(data, dict):
+        raise ValueError("隱私設定備份格式無效")
+    backup_file = _resolve_account_store(account_id).privacy_backup_file
+    backup_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write_private_bytes(
+        backup_file,
+        json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+    )
+
+
+def clear_privacy_backup(account_id: Optional[str] = None) -> None:
+    backup_file = _resolve_account_store(account_id).privacy_backup_file
+    try:
+        backup_file.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def get_learned_patterns(cfg: dict = None, account_id: Optional[str] = None) -> dict:
     cfg = cfg if cfg is not None else load_config(account_id)
     configured = cfg.get("learned_patterns", {}) if isinstance(cfg, dict) else {}
@@ -1457,6 +1495,630 @@ def update_moderation_policy(updates: dict, account_id: Optional[str] = None) ->
     return policy
 
 
+# ──────────── 帳號隱私健檢 ────────────
+
+PRIVACY_PROFILE_ITEMS = (
+    {
+        "id": "status_timestamp",
+        "key": "InputPrivacyKeyStatusTimestamp",
+        "title": "最後上線時間",
+        "description": "限制陌生人查看你的最後上線時間。",
+    },
+    {
+        "id": "chat_invite",
+        "key": "InputPrivacyKeyChatInvite",
+        "title": "群組與頻道邀請",
+        "description": "限制陌生人把你加入群組或頻道。",
+    },
+    {
+        "id": "phone_call",
+        "key": "InputPrivacyKeyPhoneCall",
+        "title": "Telegram 通話",
+        "description": "限制陌生人直接撥打 Telegram 通話。",
+    },
+    {
+        "id": "phone_p2p",
+        "key": "InputPrivacyKeyPhoneP2P",
+        "title": "通話 P2P 連線",
+        "description": "限制陌生人與你的裝置建立點對點通話連線。",
+    },
+    {
+        "id": "forwards",
+        "key": "InputPrivacyKeyForwards",
+        "title": "轉發訊息",
+        "description": "限制陌生人從轉發訊息追溯你的帳號連結。",
+    },
+    {
+        "id": "profile_photo",
+        "key": "InputPrivacyKeyProfilePhoto",
+        "title": "個人頭像",
+        "description": "限制陌生人查看你的個人頭像。",
+    },
+    {
+        "id": "phone_number",
+        "key": "InputPrivacyKeyPhoneNumber",
+        "title": "電話號碼",
+        "description": "限制其他人查看你的電話號碼。已經把號碼儲存到通訊錄的人仍可能看得到。",
+    },
+    {
+        "id": "added_by_phone",
+        "key": "InputPrivacyKeyAddedByPhone",
+        "title": "透過電話號碼找到我",
+        "description": "限制陌生人透過電話號碼找到或加入你。",
+    },
+    {
+        "id": "voice_messages",
+        "key": "InputPrivacyKeyVoiceMessages",
+        "title": "語音訊息",
+        "description": "限制陌生人傳送語音訊息。",
+    },
+    {
+        "id": "about",
+        "key": "InputPrivacyKeyAbout",
+        "title": "個人簡介",
+        "description": "限制陌生人查看你的個人簡介。",
+    },
+    {
+        "id": "birthday",
+        "key": "InputPrivacyKeyBirthday",
+        "title": "生日",
+        "description": "限制陌生人查看你的生日。",
+    },
+)
+
+_PRIVACY_RULE_LABELS = {
+    "PrivacyValueAllowAll": "所有人",
+    "PrivacyValueAllowContacts": "我的聯絡人",
+    "PrivacyValueAllowCloseFriends": "摯友",
+    "PrivacyValueAllowPremium": "Premium 使用者",
+    "PrivacyValueAllowBots": "機器人",
+    "PrivacyValueDisallowAll": "沒有人",
+    "PrivacyValueDisallowContacts": "除了聯絡人以外",
+    "PrivacyValueDisallowBots": "禁止機器人",
+    "PrivacyValueAllowUsers": "指定使用者",
+    "PrivacyValueDisallowUsers": "排除指定使用者",
+    "PrivacyValueAllowChatParticipants": "指定群組成員",
+    "PrivacyValueDisallowChatParticipants": "排除指定群組成員",
+}
+
+
+def _privacy_rule_payload(rule: Any) -> dict[str, Any]:
+    payload = {"type": type(rule).__name__}
+    for attribute in ("users", "chats"):
+        values = getattr(rule, attribute, None)
+        if values is not None:
+            payload[attribute] = [int(value) for value in values]
+    return payload
+
+
+def _serialize_privacy_rules(result: Any) -> dict[str, Any]:
+    users = {}
+    for user in getattr(result, "users", ()) or ():
+        user_id = getattr(user, "id", None)
+        if user_id is None:
+            continue
+        access_hash = getattr(user, "access_hash", None)
+        users[str(user_id)] = {
+            "id": int(user_id),
+            "access_hash": int(access_hash) if access_hash is not None else None,
+        }
+    chats = {}
+    for chat in getattr(result, "chats", ()) or ():
+        chat_id = getattr(chat, "id", None)
+        if chat_id is None:
+            continue
+        chats[str(chat_id)] = {"id": int(chat_id)}
+    return {
+        "rules": [
+            _privacy_rule_payload(rule)
+            for rule in (getattr(result, "rules", ()) or ())
+        ],
+        "users": users,
+        "chats": chats,
+    }
+
+
+def _deserialize_privacy_rules(payload: dict[str, Any], types_module: Any) -> list[Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("隱私規則備份格式無效")
+    users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
+    rules = []
+    for raw_rule in payload.get("rules", ()):
+        if not isinstance(raw_rule, dict):
+            raise ValueError("隱私規則備份格式無效")
+        rule_type = str(raw_rule.get("type") or "")
+        input_type = getattr(types_module, rule_type.replace("PrivacyValue", "InputPrivacyValue", 1), None)
+        if input_type is None:
+            raise ValueError(f"不支援還原的隱私規則：{rule_type}")
+        kwargs = {}
+        if "users" in raw_rule:
+            input_users = []
+            for raw_user_id in raw_rule.get("users") or ():
+                entry = users.get(str(raw_user_id))
+                access_hash = entry.get("access_hash") if isinstance(entry, dict) else None
+                if access_hash is None:
+                    raise ValueError(f"隱私規則缺少使用者 access hash：{raw_user_id}")
+                input_users.append(types_module.InputUser(int(raw_user_id), int(access_hash)))
+            kwargs["users"] = input_users
+        if "chats" in raw_rule:
+            kwargs["chats"] = [int(value) for value in raw_rule.get("chats") or ()]
+        rules.append(input_type(**kwargs))
+    return rules
+
+
+def _privacy_rule_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    labels = []
+    exception_count = 0
+    for raw_rule in payload.get("rules", ()) if isinstance(payload, dict) else ():
+        if not isinstance(raw_rule, dict):
+            continue
+        rule_type = str(raw_rule.get("type") or "")
+        labels.append(_PRIVACY_RULE_LABELS.get(rule_type, "自訂規則"))
+        exception_count += len(raw_rule.get("users") or ())
+        exception_count += len(raw_rule.get("chats") or ())
+    if not labels:
+        labels = ["未設定"]
+    return {
+        "label": "、".join(dict.fromkeys(labels)),
+        "exception_count": exception_count,
+    }
+
+
+def _privacy_rules_match_contacts(payload: dict[str, Any]) -> bool:
+    rules = payload.get("rules", ()) if isinstance(payload, dict) else ()
+    return len(rules) == 1 and rules[0].get("type") == "PrivacyValueAllowContacts"
+
+
+_GLOBAL_PRIVACY_FIELDS = (
+    "archive_and_mute_new_noncontact_peers",
+    "keep_archived_unmuted",
+    "keep_archived_folders",
+    "hide_read_marks",
+    "new_noncontact_peers_require_premium",
+    "display_gifts_button",
+    "noncontact_peers_paid_stars",
+)
+
+
+def _serialize_global_privacy_settings(settings: Any) -> dict[str, Any]:
+    return {
+        field: getattr(settings, field, None)
+        for field in _GLOBAL_PRIVACY_FIELDS
+        if getattr(settings, field, None) is not None
+    }
+
+
+def _apply_global_privacy_snapshot(settings: Any, snapshot: dict[str, Any]) -> Any:
+    for field in _GLOBAL_PRIVACY_FIELDS:
+        if field in snapshot:
+            setattr(settings, field, snapshot[field])
+    return settings
+
+
+def _privacy_datetime(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()
+    return str(value)
+
+
+def _serialize_authorizations(result: Any) -> list[dict[str, Any]]:
+    sessions = []
+    for authorization in getattr(result, "authorizations", ()) or ():
+        sessions.append({
+            "hash": str(getattr(authorization, "hash", "")),
+            "current": bool(getattr(authorization, "current", False)),
+            "device_model": str(getattr(authorization, "device_model", "") or ""),
+            "platform": str(getattr(authorization, "platform", "") or ""),
+            "system_version": str(getattr(authorization, "system_version", "") or ""),
+            "app_name": str(getattr(authorization, "app_name", "") or ""),
+            "app_version": str(getattr(authorization, "app_version", "") or ""),
+            "date_active": _privacy_datetime(getattr(authorization, "date_active", None)),
+            "ip": str(getattr(authorization, "ip", "") or ""),
+            "country": str(getattr(authorization, "country", "") or ""),
+            "official_app": bool(getattr(authorization, "official_app", False)),
+        })
+    return sessions
+
+
+def _privacy_check(
+    item_id: str,
+    title: str,
+    description: str,
+    current: str,
+    recommended: str,
+    status: str,
+    supported: bool = True,
+    editable: bool = True,
+    premium_required: bool = False,
+    exception_count: int = 0,
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "title": title,
+        "description": description,
+        "current": current,
+        "recommended": recommended,
+        "status": status,
+        "supported": supported,
+        "editable": editable,
+        "premium_required": premium_required,
+        "exception_count": exception_count,
+        "error": error,
+    }
+
+
+async def _collect_privacy_state(client, account_id: Optional[str] = None) -> tuple[dict[str, Any], dict[str, Any], Any]:
+    from telethon.tl import functions, types
+
+    me = await client.get_me()
+    premium = bool(getattr(me, "premium", False))
+    generated_at = datetime.now(timezone.utc).isoformat()
+    snapshot = {
+        "version": 1,
+        "account_id": account_id,
+        "saved_at": generated_at,
+        "privacy": {},
+        "global": {},
+    }
+    checks = []
+
+    for item in PRIVACY_PROFILE_ITEMS:
+        key_type = getattr(types, item["key"], None)
+        if key_type is None:
+            checks.append(_privacy_check(
+                item["id"], item["title"], item["description"],
+                "此版本 Telethon 不支援", "我的聯絡人", "unsupported",
+                supported=False, editable=False,
+            ))
+            continue
+        try:
+            result = await client(functions.account.GetPrivacyRequest(key=key_type()))
+            payload = _serialize_privacy_rules(result)
+            snapshot["privacy"][item["id"]] = payload
+            summary = _privacy_rule_summary(payload)
+            matches = _privacy_rules_match_contacts(payload)
+            checks.append(_privacy_check(
+                item["id"], item["title"], item["description"],
+                summary["label"], "我的聯絡人", "ok" if matches else "warning",
+                exception_count=summary["exception_count"],
+            ))
+        except Exception as exc:
+            checks.append(_privacy_check(
+                item["id"], item["title"], item["description"],
+                "讀取失敗", "我的聯絡人", "error", error=str(exc),
+            ))
+
+    global_settings = None
+    try:
+        global_settings = await client(functions.account.GetGlobalPrivacySettingsRequest())
+        global_snapshot = _serialize_global_privacy_settings(global_settings)
+        snapshot["global"] = global_snapshot
+        archive_enabled = bool(getattr(global_settings, "archive_and_mute_new_noncontact_peers", False))
+        checks.append(_privacy_check(
+            "archive_and_mute_new_noncontact_peers",
+            "陌生人新對話",
+            "自動封存並靜音非聯絡人的新對話，降低免費帳號被打擾的機會。",
+            "已啟用" if archive_enabled else "未啟用",
+            "已啟用",
+            "ok" if archive_enabled else "warning",
+        ))
+        premium_required_enabled = bool(getattr(global_settings, "new_noncontact_peers_require_premium", False))
+        checks.append(_privacy_check(
+            "new_noncontact_peers_require_premium",
+            "要求陌生人使用 Premium",
+            "Telegram 伺服器端的 Premium 功能，可限制非聯絡人開始聊天。",
+            "已啟用" if premium_required_enabled else "未啟用",
+            "已啟用",
+            "ok" if premium_required_enabled else ("warning" if premium else "premium_required"),
+            editable=True,
+            premium_required=True,
+        ))
+    except Exception as exc:
+        checks.append(_privacy_check(
+            "global_privacy_settings",
+            "陌生人全域設定",
+            "讀取 Telegram 全域隱私設定。",
+            "讀取失敗", "可檢查", "error", error=str(exc),
+        ))
+
+    username = str(getattr(me, "username", "") or "").strip()
+    checks.append(_privacy_check(
+        "username",
+        "公開 username",
+        "公開 username 會讓陌生人能透過 Telegram 搜尋你。",
+        f"@{username}" if username else "未設定",
+        "不公開（需要時手動移除）",
+        "warning" if username else "ok",
+        editable=False,
+    ))
+
+    two_factor = {"enabled": False, "recovery_configured": False, "hint": "", "error": None}
+    try:
+        password = await client(functions.account.GetPasswordRequest())
+        two_factor = {
+            "enabled": bool(getattr(password, "has_password", False)),
+            "recovery_configured": bool(getattr(password, "has_recovery", False)),
+            "hint": str(getattr(password, "hint", "") or ""),
+            "error": None,
+        }
+    except Exception as exc:
+        two_factor["error"] = str(exc)
+    checks.append(_privacy_check(
+        "two_step_verification",
+        "兩步驟驗證",
+        "為帳號登入增加額外密碼；密碼不會保存到 TeleShield。",
+        "讀取失敗" if two_factor["error"] else ("已開啟" if two_factor["enabled"] else "未開啟"),
+        "已開啟",
+        "error" if two_factor["error"] else ("ok" if two_factor["enabled"] else "warning"),
+        editable=True,
+        error=two_factor["error"],
+    ))
+
+    authorizations = None
+    sessions = []
+    authorization_error = None
+    try:
+        authorizations = await client(functions.account.GetAuthorizationsRequest())
+        sessions = _serialize_authorizations(authorizations)
+    except Exception as exc:
+        authorization_error = str(exc)
+    unknown_session_count = sum(1 for session in sessions if not session["current"])
+    if authorization_error:
+        checks.append(_privacy_check(
+            "active_sessions",
+            "登入中的裝置",
+            "檢查是否有不認識的 Telegram Session。",
+            "讀取失敗", "只保留認識的裝置", "error", editable=False,
+            error=authorization_error,
+        ))
+    else:
+        current_session_count = sum(1 for session in sessions if session["current"])
+        checks.append(_privacy_check(
+            "active_sessions",
+            "登入中的裝置",
+            "檢查是否有不認識的 Telegram Session。",
+            f"目前帳號 {current_session_count} 台，其他裝置 {unknown_session_count} 台",
+            "只保留認識的裝置",
+            "warning" if unknown_session_count else "ok",
+            editable=False,
+        ))
+
+    audit = {
+        "account_id": account_id,
+        "premium": premium,
+        "premium_status": "active" if premium else "not_purchased",
+        "generated_at": generated_at,
+        "checks": checks,
+        "username": username,
+        "two_factor_enabled": two_factor["enabled"],
+        "two_factor_recovery_configured": two_factor["recovery_configured"],
+        "two_factor_hint": two_factor["hint"],
+        "sessions": sessions,
+        "unknown_session_count": unknown_session_count,
+        "backup_available": load_privacy_backup(account_id) is not None,
+    }
+    return audit, snapshot, global_settings
+
+
+def _privacy_client():
+    from telethon import TelegramClient
+
+    store = _resolve_account_store()
+    store.ensure()
+    cfg = load_config()
+    if not cfg.get("api_id") or not cfg.get("api_hash"):
+        raise RuntimeError("尚未登入 Telegram")
+    try:
+        api_id = int(cfg["api_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("尚未登入 Telegram") from exc
+    return TelegramClient(str(store.session_file), api_id, cfg["api_hash"])
+
+
+async def _ensure_privacy_client_ready(client) -> None:
+    await client.connect()
+    try:
+        authorized = await client.is_user_authorized()
+    except Exception:
+        await client.disconnect()
+        raise
+    if not authorized:
+        await client.disconnect()
+        raise RuntimeError("Telegram Session 已失效，請先重新登入")
+
+
+async def _restore_privacy_snapshot(client, snapshot: dict[str, Any]) -> None:
+    from telethon.tl import functions, types
+
+    privacy = snapshot.get("privacy") if isinstance(snapshot.get("privacy"), dict) else {}
+    item_by_id = {item["id"]: item for item in PRIVACY_PROFILE_ITEMS}
+    for item_id, payload in privacy.items():
+        item = item_by_id.get(item_id)
+        if item is None:
+            continue
+        key_type = getattr(types, item["key"], None)
+        if key_type is None:
+            continue
+        rules = _deserialize_privacy_rules(payload, types)
+        await client(functions.account.SetPrivacyRequest(key=key_type(), rules=rules))
+
+    global_snapshot = snapshot.get("global") if isinstance(snapshot.get("global"), dict) else {}
+    if global_snapshot:
+        settings = await client(functions.account.GetGlobalPrivacySettingsRequest())
+        _apply_global_privacy_snapshot(settings, global_snapshot)
+        try:
+            await client(functions.account.SetGlobalPrivacySettingsRequest(settings=settings))
+        except Exception as exc:
+            if "PREMIUM" in type(exc).__name__.upper() or "PREMIUM_ACCOUNT_REQUIRED" in str(exc).upper():
+                raise PremiumAccountRequiredError(
+                    "此帳號沒有購買 Telegram Premium，無法還原 Premium 隱私設定。"
+                ) from exc
+            raise
+
+
+async def _audit_with_client(client, account_id: Optional[str] = None) -> dict[str, Any]:
+    audit, _snapshot, _global_settings = await _collect_privacy_state(client, account_id)
+    return audit
+
+
+@_session_leased
+async def get_privacy_audit(account_id: Optional[str] = None) -> dict[str, Any]:
+    client = _privacy_client()
+    connected = False
+    try:
+        await _ensure_privacy_client_ready(client)
+        connected = True
+        audit, _snapshot, _global_settings = await _collect_privacy_state(client, account_id)
+        return audit
+    finally:
+        if connected:
+            await client.disconnect()
+
+
+@_session_leased
+async def apply_privacy_profile(
+    include_premium: bool = False,
+    account_id: Optional[str] = None,
+) -> dict[str, Any]:
+    from telethon.tl import functions, types
+
+    client = _privacy_client()
+    connected = False
+    try:
+        await _ensure_privacy_client_ready(client)
+        connected = True
+        audit, snapshot, global_settings = await _collect_privacy_state(client, account_id)
+        if include_premium and not audit["premium"]:
+            raise PremiumAccountRequiredError(
+                "此帳號沒有購買 Telegram Premium，無法啟用 Premium 隱私功能。"
+            )
+        if global_settings is None:
+            raise RuntimeError("Telegram 全域隱私設定無法讀取")
+
+        save_privacy_backup(snapshot, account_id)
+        try:
+            for item in PRIVACY_PROFILE_ITEMS:
+                key_type = getattr(types, item["key"], None)
+                if key_type is None or item["id"] not in snapshot["privacy"]:
+                    continue
+                await client(functions.account.SetPrivacyRequest(
+                    key=key_type(),
+                    rules=[types.InputPrivacyValueAllowContacts()],
+                ))
+
+            global_settings.archive_and_mute_new_noncontact_peers = True
+            if include_premium:
+                global_settings.new_noncontact_peers_require_premium = True
+            try:
+                await client(functions.account.SetGlobalPrivacySettingsRequest(settings=global_settings))
+            except Exception as exc:
+                if "PREMIUM" in type(exc).__name__.upper() or "PREMIUM_ACCOUNT_REQUIRED" in str(exc).upper():
+                    raise PremiumAccountRequiredError(
+                        "此帳號沒有購買 Telegram Premium，無法啟用 Premium 隱私功能。"
+                    ) from exc
+                raise
+        except Exception:
+            try:
+                await _restore_privacy_snapshot(client, snapshot)
+            except Exception:
+                # Keep the original failure visible; the backup remains available
+                # for a manual restore attempt from the UI.
+                pass
+            raise
+
+        next_audit, _next_snapshot, _next_global = await _collect_privacy_state(client, account_id)
+        next_audit["backup_available"] = True
+        return next_audit
+    finally:
+        if connected:
+            await client.disconnect()
+
+
+@_session_leased
+async def restore_privacy_settings(account_id: Optional[str] = None) -> dict[str, Any]:
+    client = _privacy_client()
+    connected = False
+    try:
+        await _ensure_privacy_client_ready(client)
+        connected = True
+        snapshot = load_privacy_backup(account_id)
+        if snapshot is None:
+            raise RuntimeError("找不到可還原的隱私設定備份")
+        await _restore_privacy_snapshot(client, snapshot)
+        clear_privacy_backup(account_id)
+        audit, _next_snapshot, _global_settings = await _collect_privacy_state(client, account_id)
+        audit["backup_available"] = False
+        return audit
+    finally:
+        if connected:
+            await client.disconnect()
+
+
+@_session_leased
+async def revoke_authorization(session_hash: str, account_id: Optional[str] = None) -> dict[str, Any]:
+    from telethon.tl import functions
+
+    try:
+        session_hash_value = int(str(session_hash).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Session hash 格式無效") from exc
+    client = _privacy_client()
+    connected = False
+    try:
+        await _ensure_privacy_client_ready(client)
+        connected = True
+        authorizations = await client(functions.account.GetAuthorizationsRequest())
+        target = next(
+            (
+                authorization
+                for authorization in (getattr(authorizations, "authorizations", ()) or ())
+                if int(getattr(authorization, "hash", 0)) == session_hash_value
+            ),
+            None,
+        )
+        if target is None:
+            raise ValueError("找不到指定的 Telegram Session")
+        if getattr(target, "current", False):
+            raise ValueError("不能撤銷目前正在使用的 Session")
+        await client(functions.account.ResetAuthorizationRequest(hash=session_hash_value))
+        return await _audit_with_client(client, account_id=account_id)
+    finally:
+        if connected:
+            await client.disconnect()
+
+
+@_session_leased
+async def update_two_factor(
+    current_password: str = "",
+    new_password: str = "",
+    hint: str = "",
+    account_id: Optional[str] = None,
+) -> dict[str, Any]:
+    client = _privacy_client()
+    connected = False
+    try:
+        await _ensure_privacy_client_ready(client)
+        connected = True
+        current = str(current_password or "") or None
+        new = str(new_password or "") or None
+        if current is None and new is None:
+            raise ValueError("請輸入新的兩步驟驗證密碼，或輸入目前密碼以關閉兩步驟驗證")
+        await client.edit_2fa(
+            current_password=current,
+            new_password=new,
+            hint=str(hint or "").strip() if new is not None else "",
+        )
+        return await _audit_with_client(client, account_id=account_id)
+    finally:
+        if connected:
+            await client.disconnect()
+
+
 def _telegram_api_error_message(payload: str) -> str:
     try:
         decoded = json.loads(payload)
@@ -1527,6 +2189,7 @@ def _notification_account_identity(
     cfg: Optional[dict] = None,
 ) -> tuple[str, str]:
     """Return the human-facing Telegram identity that owns a notification."""
+    explicit_cfg = isinstance(cfg, dict)
     if cfg is None:
         cfg = load_config(account_id)
     if not isinstance(cfg, dict):
@@ -1541,17 +2204,17 @@ def _notification_account_identity(
 
     record = get_account(resolved_account_id) if resolved_account_id else None
     record = record if isinstance(record, dict) else {}
+    primary = cfg if explicit_cfg else record
+    secondary = record if explicit_cfg else cfg
 
-    display_name = " ".join(
-        str(record.get("display_name") or cfg.get("display_name") or "").split()
-    )
-    username = str(record.get("username") or cfg.get("username") or "").strip()
+    display_name = " ".join(str(primary.get("display_name") or secondary.get("display_name") or "").split())
+    username = str(primary.get("username") or secondary.get("username") or "").strip()
     if not display_name:
         display_name = f"@{username.lstrip('@')}" if username else "未知帳號"
 
-    owner_user_id = record.get("user_id")
+    owner_user_id = primary.get("user_id")
     if owner_user_id in (None, ""):
-        owner_user_id = cfg.get("user_id")
+        owner_user_id = secondary.get("user_id")
     owner_user_id = str(owner_user_id).strip() if owner_user_id not in (None, "") else "未知 ID"
     return display_name, owner_user_id
 

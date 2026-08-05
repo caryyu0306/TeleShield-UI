@@ -8,13 +8,14 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case rules = "學習規則"
     case reports = "報告"
     case records = "封鎖記錄"
+    case privacy = "隱私健檢"
     case settings = "全域設定"
     case accounts = "帳號"
 
     var id: String { rawValue }
 
     static var workspaceCases: [AppSection] {
-        [.overview, .historyScan, .lists, .rules, .reports, .records]
+        [.overview, .historyScan, .lists, .rules, .reports, .records, .privacy]
     }
 
     static var managementCases: [AppSection] {
@@ -28,6 +29,7 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
         case .rules: return "text.magnifyingglass"
         case .reports: return "chart.bar.xaxis"
         case .records: return "list.bullet.rectangle"
+        case .privacy: return "lock.shield"
         case .settings: return "gearshape"
         case .accounts: return "person.crop.circle"
         }
@@ -171,6 +173,7 @@ struct ContentView: View {
         case .rules: RulesView(client: client)
         case .reports: ReportView(client: client)
         case .records: BlockRecordsView(client: client)
+        case .privacy: PrivacyAuditView(client: client)
         case .settings: GlobalSettingsView(client: client, updater: updater)
         case .accounts: AccountsView(client: client, showLogin: $showLogin)
         }
@@ -886,6 +889,516 @@ private struct BlockRecordsView: View {
     private func export(_ format: String) {
         guard let url = savePanel(fileExtension: format, name: "teleShield-blocks.\(format)") else { return }
         Task { await client.exportBlocks(path: url.path, query: query, source: source, format: format) }
+    }
+}
+
+private struct PrivacyAuditView: View {
+    @ObservedObject var client: CoreClient
+    @State private var showApplyConfirmation = false
+    @State private var showPremiumConfirmation = false
+    @State private var showRestoreConfirmation = false
+    @State private var showPremiumAlert = false
+    @State private var showTwoFactorSheet = false
+    @State private var pendingRevokeSession: PrivacySession?
+    @State private var actionError = ""
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                PageHeader(
+                    title: "隱私健檢",
+                    subtitle: "直接讀取目前 Telegram 帳號的隱私設定，找出陌生人、登入安全與 Premium 控制的風險"
+                ) {
+                    Button {
+                        Task { await client.fetchPrivacyAudit() }
+                    } label: {
+                        Label("重新檢查", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(client.isBusy)
+                }
+
+                if let audit = client.privacyAudit {
+                    HStack(spacing: 14) {
+                        MetricCard(title: "良好項目", value: "\(audit.healthyCheckCount)", icon: "checkmark.shield")
+                        MetricCard(title: "建議處理", value: "\(audit.warningCheckCount)", icon: "exclamationmark.shield")
+                        MetricCard(title: "其他 Session", value: "\(audit.unknownSessionCount)", icon: "laptopcomputer.and.iphone")
+                    }
+
+                    PrivacyAuditActionCard(
+                        audit: audit,
+                        isBusy: client.isBusy,
+                        onApplyFree: { showApplyConfirmation = true },
+                        onApplyPremium: { showPremiumConfirmation = true },
+                        onRestore: { showRestoreConfirmation = true }
+                    )
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("隱私設定檢查")
+                                .font(.headline)
+                            Spacer()
+                            Text("讀取時間：\(TimestampFormatter.localString(audit.generatedAt))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(audit.checks) { check in
+                            PrivacyCheckRow(check: check)
+                        }
+                    }
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .teleShieldSurface(radius: 14)
+
+                    PrivacyTwoFactorCard(audit: audit, isBusy: client.isBusy) {
+                        showTwoFactorSheet = true
+                    }
+
+                    PrivacySessionsCard(
+                        sessions: audit.sessions,
+                        isBusy: client.isBusy,
+                        onRevoke: { pendingRevokeSession = $0 }
+                    )
+
+                    Label(
+                        "設定會透過 MTProto 同步到此 Telegram 帳號的其他已登入 Session；套用前會先保存目前設定，可從上方復原。",
+                        systemImage: "info.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    if !actionError.isEmpty {
+                        Text(actionError)
+                            .font(.callout)
+                            .foregroundStyle(TeleShieldDesign.danger)
+                            .textSelection(.enabled)
+                    }
+                } else if client.selectedAccount?.configured == true {
+                    ProgressView("正在讀取 Telegram 隱私設定…")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    TeleShieldEmptyState(
+                        icon: "lock.shield",
+                        title: "請先登入 Telegram 帳號",
+                        message: "隱私健檢需要使用者 Session，登入後才能透過 MTProto 讀取與調整帳號級設定。"
+                    )
+                }
+            }
+            .teleShieldPageContent()
+            .padding(TeleShieldDesign.pagePadding)
+        }
+        .task(id: client.selectedAccountID) {
+            actionError = ""
+            await client.fetchPrivacyAudit()
+        }
+        .confirmationDialog(
+            "套用免費版隱私建議？",
+            isPresented: $showApplyConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("確認套用") {
+                runPrivacyProfile(includePremium: false)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("會將支援的隱私項目調整為「我的聯絡人」，並啟用陌生人新對話自動封存與靜音。套用前會保存目前設定。")
+        }
+        .confirmationDialog(
+            "套用 Premium 隱私建議？",
+            isPresented: $showPremiumConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("確認套用") {
+                runPrivacyProfile(includePremium: true)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("除了免費版建議，也會啟用 Telegram 的「要求陌生人使用 Premium」設定。若此帳號未購買 Premium，將顯示帳號資格提示。")
+        }
+        .confirmationDialog(
+            "復原隱私設定？",
+            isPresented: $showRestoreConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("確認復原", role: .destructive) {
+                runRestore()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("將嘗試還原套用建議前保存的 Telegram 隱私規則與全域隱私設定。")
+        }
+        .confirmationDialog(
+            "撤銷此 Telegram Session？",
+            isPresented: Binding(
+                get: { pendingRevokeSession != nil },
+                set: { if !$0 { pendingRevokeSession = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("撤銷 Session", role: .destructive) {
+                guard let session = pendingRevokeSession else { return }
+                pendingRevokeSession = nil
+                runRevoke(session)
+            }
+            Button("取消", role: .cancel) { pendingRevokeSession = nil }
+        } message: {
+            Text("撤銷後該裝置會被 Telegram 登出；目前正在使用的 Session 不會列出此操作。")
+        }
+        .alert("此帳號沒有購買 Telegram Premium", isPresented: $showPremiumAlert) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text("Premium 隱私功能只能由已購買 Telegram Premium 的帳號啟用；免費版隱私建議仍可單獨套用。")
+        }
+        .sheet(isPresented: $showTwoFactorSheet) {
+            if let audit = client.privacyAudit {
+                TwoFactorSettingsSheet(client: client, audit: audit)
+            }
+        }
+    }
+
+    private func runPrivacyProfile(includePremium: Bool) {
+        actionError = ""
+        Task {
+            let result = await client.applyPrivacyProfile(includePremium: includePremium)
+            handleActionResult(result)
+        }
+    }
+
+    private func runRestore() {
+        actionError = ""
+        Task {
+            let result = await client.restorePrivacySettings()
+            handleActionResult(result)
+        }
+    }
+
+    private func runRevoke(_ session: PrivacySession) {
+        actionError = ""
+        Task {
+            let result = await client.revokeAuthorization(sessionHash: session.hash)
+            handleActionResult(result)
+        }
+    }
+
+    private func handleActionResult(_ result: String?) {
+        guard let result, !result.isEmpty else { return }
+        if result.localizedCaseInsensitiveContains("premium") {
+            showPremiumAlert = true
+        } else {
+            actionError = result
+        }
+    }
+}
+
+private struct PrivacyAuditActionCard: View {
+    let audit: PrivacyAudit
+    let isBusy: Bool
+    let onApplyFree: () -> Void
+    let onApplyPremium: () -> Void
+    let onRestore: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(
+                        audit.premium ? "Telegram Premium 已啟用" : "Telegram Premium 未購買",
+                        systemImage: audit.premium ? "crown.fill" : "crown"
+                    )
+                    .font(.headline)
+                    .foregroundStyle(audit.premium ? .purple : TeleShieldDesign.warning)
+                    Text(audit.username.isEmpty ? "未設定公開 username" : "公開 username：@\(audit.username)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if audit.backupAvailable {
+                    Label("有可復原備份", systemImage: "arrow.uturn.backward.circle")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.blue)
+                }
+            }
+
+            Text("免費版建議會收緊陌生人可見範圍；Premium 建議會再要求陌生人使用 Premium 才能開始聊天。")
+                .font(.callout)
+                .foregroundStyle(TeleShieldDesign.muted)
+
+            HStack(spacing: 10) {
+                Button("套用免費版建議", action: onApplyFree)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy)
+                Button("套用 Premium 建議", action: onApplyPremium)
+                    .buttonStyle(.bordered)
+                    .disabled(isBusy)
+                if audit.backupAvailable {
+                    Button("復原套用前設定", role: .destructive, action: onRestore)
+                        .disabled(isBusy)
+                }
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .teleShieldSurface(radius: 14, fill: audit.premium ? Color.purple.opacity(0.08) : Color.orange.opacity(0.08))
+    }
+}
+
+private struct PrivacyCheckRow: View {
+    let check: PrivacyCheck
+
+    private var statusColor: Color {
+        switch check.status {
+        case "ok": return TeleShieldDesign.success
+        case "error", "premium_required": return TeleShieldDesign.danger
+        case "unsupported": return .secondary
+        default: return TeleShieldDesign.warning
+        }
+    }
+
+    private var statusIcon: String {
+        switch check.status {
+        case "ok": return "checkmark.circle.fill"
+        case "error": return "xmark.octagon.fill"
+        case "premium_required": return "crown.fill"
+        case "unsupported": return "questionmark.circle.fill"
+        default: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: statusIcon)
+                .foregroundStyle(statusColor)
+                .font(.title3)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(check.title).font(.callout.weight(.semibold))
+                    Text(check.statusTitle)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(statusColor)
+                }
+                Text(check.description)
+                    .font(.caption)
+                    .foregroundStyle(TeleShieldDesign.muted)
+                if let error = check.error, !error.isEmpty {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(TeleShieldDesign.danger)
+                        .textSelection(.enabled)
+                }
+                if check.exceptionCount > 0 {
+                    Text("目前包含 \(check.exceptionCount) 個例外對象")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 12)
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(check.current)
+                    .font(.callout.weight(.medium))
+                    .multilineTextAlignment(.trailing)
+                if !check.isHealthy && !check.recommended.isEmpty {
+                    Text("建議：\(check.recommended)")
+                        .font(.caption)
+                        .foregroundStyle(statusColor)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+            .frame(maxWidth: 230, alignment: .trailing)
+        }
+        .padding(.vertical, 8)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
+}
+
+private struct PrivacyTwoFactorCard: View {
+    let audit: PrivacyAudit
+    let isBusy: Bool
+    let onEdit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("兩步驟驗證", systemImage: audit.twoFactorEnabled ? "checkmark.shield.fill" : "shield")
+                    .font(.headline)
+                    .foregroundStyle(audit.twoFactorEnabled ? TeleShieldDesign.success : TeleShieldDesign.warning)
+                Spacer()
+                Button(audit.twoFactorEnabled ? "更新設定" : "立即設定", action: onEdit)
+                    .disabled(isBusy)
+            }
+            Text(
+                audit.twoFactorEnabled
+                    ? (audit.twoFactorRecoveryConfigured ? "已開啟，且已設定復原 Email。" : "已開啟，但尚未確認復原 Email。")
+                    : "尚未開啟；建議為 Telegram 帳號設定額外密碼。"
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            if !audit.twoFactorHint.isEmpty {
+                Text("密碼提示：\(audit.twoFactorHint)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("密碼只會暫時送往 Telegram，TeleShield 不會保存。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .teleShieldSurface(radius: 14)
+    }
+}
+
+private struct PrivacySessionsCard: View {
+    let sessions: [PrivacySession]
+    let isBusy: Bool
+    let onRevoke: (PrivacySession) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("登入中的裝置", systemImage: "laptopcomputer.and.iphone")
+                    .font(.headline)
+                Spacer()
+                Text("\(sessions.count) 台")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if sessions.isEmpty {
+                Text("Telegram 沒有回傳可檢視的 Session。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(sessions) { session in
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: session.current ? "macbook.and.iphone" : "desktopcomputer")
+                            .foregroundStyle(session.current ? .green : .secondary)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text(session.deviceTitle)
+                                    .font(.callout.weight(.semibold))
+                                if session.current {
+                                    Text("目前裝置")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                            Text([session.appTitle, session.ip, session.country].filter { !$0.isEmpty }.joined(separator: " · "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let dateActive = session.dateActive {
+                                Text("最近活動：\(TimestampFormatter.localString(dateActive))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 8)
+                        if !session.current {
+                            Button("撤銷", role: .destructive) {
+                                onRevoke(session)
+                            }
+                            .disabled(isBusy)
+                        }
+                    }
+                    .padding(.vertical, 7)
+                    .overlay(alignment: .bottom) { Divider() }
+                }
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .teleShieldSurface(radius: 14)
+    }
+}
+
+private struct TwoFactorSettingsSheet: View {
+    @ObservedObject var client: CoreClient
+    let audit: PrivacyAudit
+    @Environment(\.dismiss) private var dismiss
+    @State private var currentPassword = ""
+    @State private var newPassword = ""
+    @State private var confirmation = ""
+    @State private var hint = ""
+    @State private var removeTwoFactor = false
+    @State private var validationMessage = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("兩步驟驗證")
+                        .font(.title2.bold())
+                    Text(audit.twoFactorEnabled ? "更新或關閉目前的額外密碼" : "為 Telegram 帳號設定額外密碼")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("取消") { dismiss() }
+            }
+
+            if audit.twoFactorEnabled {
+                SecureField("目前密碼", text: $currentPassword)
+                Toggle("關閉兩步驟驗證", isOn: $removeTwoFactor)
+            }
+
+            if !audit.twoFactorEnabled || !removeTwoFactor {
+                SecureField("新的密碼", text: $newPassword)
+                SecureField("確認新的密碼", text: $confirmation)
+                TextField("密碼提示（不要輸入密碼本身）", text: $hint)
+            }
+
+            Text("Telegram 會直接驗證密碼；TeleShield 不會把密碼寫入設定檔或備份。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if !validationMessage.isEmpty {
+                Text(validationMessage)
+                    .font(.callout)
+                    .foregroundStyle(TeleShieldDesign.danger)
+            }
+
+            HStack {
+                Spacer()
+                Button("儲存") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(client.isBusy)
+            }
+        }
+        .padding(24)
+        .frame(width: 500)
+    }
+
+    private func save() {
+        validationMessage = ""
+        if audit.twoFactorEnabled && currentPassword.isEmpty {
+            validationMessage = "請輸入目前密碼。"
+            return
+        }
+        if !audit.twoFactorEnabled || !removeTwoFactor {
+            guard !newPassword.isEmpty else {
+                validationMessage = "請輸入新的密碼。"
+                return
+            }
+            guard newPassword == confirmation else {
+                validationMessage = "兩次輸入的新密碼不一致。"
+                return
+            }
+        }
+
+        let password = removeTwoFactor ? "" : newPassword
+        Task {
+            let result = await client.updateTwoFactor(
+                currentPassword: currentPassword,
+                newPassword: password,
+                hint: hint
+            )
+            if let result, !result.isEmpty {
+                validationMessage = result
+            } else {
+                dismiss()
+            }
+        }
     }
 }
 

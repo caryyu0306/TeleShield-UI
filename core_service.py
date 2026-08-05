@@ -201,6 +201,11 @@ class CoreService:
             "get_moderation_policy": self._get_moderation_policy,
             "update_moderation_policy": self._update_moderation_policy,
             "test_telegram_notification": self._test_telegram_notification,
+            "get_privacy_audit": self._get_privacy_audit,
+            "apply_privacy_profile": self._apply_privacy_profile,
+            "restore_privacy_settings": self._restore_privacy_settings,
+            "revoke_authorization": self._revoke_authorization,
+            "update_two_factor": self._update_two_factor,
             "start_scan": self._start_scan,
             "cancel_scan": self._cancel_scan,
             "shutdown": self._shutdown,
@@ -957,6 +962,80 @@ class CoreService:
             channel_id,
             account_id=self._resolve_account_id(params),
         )
+
+    def _get_privacy_audit(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        self._assert_account_idle(account_id)
+        getter = getattr(self.core, "get_privacy_audit", None)
+        if not callable(getter):
+            raise InvalidRequestError("目前核心不支援隱私健檢")
+        return asyncio.run(getter(account_id=account_id))
+
+    def _apply_privacy_profile(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        self._assert_account_idle(account_id)
+        applier = getattr(self.core, "apply_privacy_profile", None)
+        if not callable(applier):
+            raise InvalidRequestError("目前核心不支援隱私設定調整")
+        return asyncio.run(
+            applier(
+                include_premium=self._coerce_bool(params.get("include_premium")),
+                account_id=account_id,
+            )
+        )
+
+    def _restore_privacy_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        self._assert_account_idle(account_id)
+        restorer = getattr(self.core, "restore_privacy_settings", None)
+        if not callable(restorer):
+            raise InvalidRequestError("目前核心不支援隱私設定復原")
+        return asyncio.run(restorer(account_id=account_id))
+
+    def _revoke_authorization(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        self._assert_account_idle(account_id)
+        session_hash = str(params.get("session_hash") or "").strip()
+        if not session_hash:
+            raise InvalidRequestError("session_hash 不可為空")
+        revoker = getattr(self.core, "revoke_authorization", None)
+        if not callable(revoker):
+            raise InvalidRequestError("目前核心不支援撤銷 Telegram Session")
+        return asyncio.run(
+            revoker(session_hash=session_hash, account_id=account_id)
+        )
+
+    def _update_two_factor(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        self._assert_account_idle(account_id)
+        updater = getattr(self.core, "update_two_factor", None)
+        if not callable(updater):
+            raise InvalidRequestError("目前核心不支援兩步驟驗證")
+
+        current_password = str(params.get("current_password") or "")
+        new_password = str(params.get("new_password") or "")
+        hint = str(params.get("hint") or "")
+        sensitive_values = [
+            value for value in (current_password, new_password) if value
+        ]
+        with self._lock:
+            self._sensitive_values.extend(sensitive_values)
+        try:
+            return asyncio.run(
+                updater(
+                    current_password=current_password,
+                    new_password=new_password,
+                    hint=hint,
+                    account_id=account_id,
+                )
+            )
+        finally:
+            with self._lock:
+                for value in sensitive_values:
+                    try:
+                        self._sensitive_values.remove(value)
+                    except ValueError:
+                        pass
 
     def _start_async_job(
         self,

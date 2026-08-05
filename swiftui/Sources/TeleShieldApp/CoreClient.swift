@@ -23,6 +23,7 @@ final class CoreClient: ObservableObject {
     @Published private(set) var blacklist: [ListEntry] = []
     @Published private(set) var learnedPatterns = LearnedPatterns.empty
     @Published private(set) var blockRecords: [BlockRecord] = []
+    @Published private(set) var privacyAudit: PrivacyAudit?
     @Published private(set) var report: Report?
     @Published private(set) var scanSettings = ScanSettings.defaults
     @Published private(set) var moderationPolicy = ModerationPolicy.defaults
@@ -158,6 +159,7 @@ final class CoreClient: ObservableObject {
             self.blacklist = []
             self.eventLog.removeAll()
             self.details = nil
+            self.privacyAudit = nil
             self.scanSettings = .defaults
             self.moderationPolicy = .defaults
             self.learnedPatterns = .empty
@@ -439,6 +441,138 @@ final class CoreClient: ObservableObject {
             guard selectedAccountID == accountID else { return }
             blockRecords = nextRecords
         } catch { present(error: error) }
+    }
+
+    func fetchPrivacyAudit(accountID: String? = nil) async {
+        do {
+            guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {
+                privacyAudit = nil
+                return
+            }
+            let data = try await request(
+                method: "get_privacy_audit",
+                params: ["account_id": .string(targetAccountID)]
+            )
+            let nextAudit = try decodeResult(PrivacyAudit.self, from: data)
+            guard selectedAccountID == targetAccountID else { return }
+            privacyAudit = nextAudit
+        } catch { present(error: error) }
+    }
+
+    func applyPrivacyProfile(includePremium: Bool, accountID: String? = nil) async -> String? {
+        guard !isBusy else { return "目前已有操作進行中" }
+        guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {
+            let error = CoreClientError(message: "請先選取已登入的 Telegram 帳號")
+            present(error: error)
+            return error.localizedDescription
+        }
+        isBusy = true
+        busyOperation = includePremium ? "啟用 Premium 隱私建議" : "套用免費版隱私建議"
+        defer { isBusy = false; busyOperation = nil }
+        do {
+            let data = try await request(
+                method: "apply_privacy_profile",
+                params: [
+                    "account_id": .string(targetAccountID),
+                    "include_premium": .bool(includePremium),
+                ]
+            )
+            let nextAudit = try decodeResult(PrivacyAudit.self, from: data)
+            if selectedAccountID == targetAccountID { privacyAudit = nextAudit }
+            appendLog(includePremium ? "已套用 Premium 隱私建議" : "已套用免費版隱私建議", level: "info")
+            return nil
+        } catch {
+            present(error: error)
+            return error.localizedDescription
+        }
+    }
+
+    func restorePrivacySettings(accountID: String? = nil) async -> String? {
+        guard !isBusy else { return "目前已有操作進行中" }
+        guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {
+            let error = CoreClientError(message: "請先選取已登入的 Telegram 帳號")
+            present(error: error)
+            return error.localizedDescription
+        }
+        isBusy = true
+        busyOperation = "復原隱私設定"
+        defer { isBusy = false; busyOperation = nil }
+        do {
+            let data = try await request(
+                method: "restore_privacy_settings",
+                params: ["account_id": .string(targetAccountID)]
+            )
+            let nextAudit = try decodeResult(PrivacyAudit.self, from: data)
+            if selectedAccountID == targetAccountID { privacyAudit = nextAudit }
+            appendLog("已復原套用隱私建議前的設定", level: "info")
+            return nil
+        } catch {
+            present(error: error)
+            return error.localizedDescription
+        }
+    }
+
+    func revokeAuthorization(sessionHash: String, accountID: String? = nil) async -> String? {
+        guard !isBusy else { return "目前已有操作進行中" }
+        guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {
+            let error = CoreClientError(message: "請先選取已登入的 Telegram 帳號")
+            present(error: error)
+            return error.localizedDescription
+        }
+        isBusy = true
+        busyOperation = "撤銷 Telegram Session"
+        defer { isBusy = false; busyOperation = nil }
+        do {
+            let data = try await request(
+                method: "revoke_authorization",
+                params: [
+                    "account_id": .string(targetAccountID),
+                    "session_hash": .string(sessionHash),
+                ]
+            )
+            let nextAudit = try decodeResult(PrivacyAudit.self, from: data)
+            if selectedAccountID == targetAccountID { privacyAudit = nextAudit }
+            appendLog("已撤銷 Telegram Session", level: "info")
+            return nil
+        } catch {
+            present(error: error)
+            return error.localizedDescription
+        }
+    }
+
+    func updateTwoFactor(
+        currentPassword: String,
+        newPassword: String,
+        hint: String,
+        accountID: String? = nil
+    ) async -> String? {
+        guard !isBusy else { return "目前已有操作進行中" }
+        guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {
+            let error = CoreClientError(message: "請先選取已登入的 Telegram 帳號")
+            present(error: error)
+            return error.localizedDescription
+        }
+        isBusy = true
+        busyOperation = "更新兩步驟驗證"
+        defer { isBusy = false; busyOperation = nil }
+        do {
+            let data = try await request(
+                method: "update_two_factor",
+                params: [
+                    "account_id": .string(targetAccountID),
+                    "current_password": .string(currentPassword),
+                    "new_password": .string(newPassword),
+                    "hint": .string(hint),
+                ]
+            )
+            let nextAudit = try decodeResult(PrivacyAudit.self, from: data)
+            if selectedAccountID == targetAccountID { privacyAudit = nextAudit }
+            appendLog("兩步驟驗證設定已更新", level: "info")
+            return nil
+        } catch {
+            present(error: error)
+            return error.localizedDescription
+        }
     }
 
     func exportBlocks(path: String, query: String, source: String, format: String) async {

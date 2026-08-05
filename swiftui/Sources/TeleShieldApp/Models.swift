@@ -289,6 +289,165 @@ struct AccountDetails: Codable {
     }
 }
 
+struct PrivacyCheck: Codable, Identifiable {
+    let id: String
+    let title: String
+    let description: String
+    let current: String
+    let recommended: String
+    let status: String
+    let supported: Bool
+    let editable: Bool
+    let premiumRequired: Bool
+    let exceptionCount: Int
+    let error: String?
+
+    var isHealthy: Bool { status == "ok" }
+
+    var statusTitle: String {
+        switch status {
+        case "ok": return "良好"
+        case "unsupported": return "不支援"
+        case "error": return "讀取失敗"
+        case "premium_required": return "需要 Premium"
+        default: return "建議調整"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case description
+        case current
+        case recommended
+        case status
+        case supported
+        case editable
+        case premiumRequired = "premium_required"
+        case exceptionCount = "exception_count"
+        case error
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? container.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        title = (try? container.decode(String.self, forKey: .title)) ?? "隱私設定"
+        description = (try? container.decode(String.self, forKey: .description)) ?? ""
+        current = (try? container.decode(String.self, forKey: .current)) ?? "未知"
+        recommended = (try? container.decode(String.self, forKey: .recommended)) ?? ""
+        status = (try? container.decode(String.self, forKey: .status)) ?? "warning"
+        supported = (try? container.decode(Bool.self, forKey: .supported)) ?? true
+        editable = (try? container.decode(Bool.self, forKey: .editable)) ?? false
+        premiumRequired = (try? container.decode(Bool.self, forKey: .premiumRequired)) ?? false
+        exceptionCount = (try? container.decode(Int.self, forKey: .exceptionCount)) ?? 0
+        error = try? container.decode(String.self, forKey: .error)
+    }
+}
+
+struct PrivacySession: Codable, Identifiable {
+    let hash: String
+    let current: Bool
+    let deviceModel: String
+    let platform: String
+    let systemVersion: String
+    let appName: String
+    let appVersion: String
+    let dateActive: String?
+    let ip: String
+    let country: String
+    let officialApp: Bool
+
+    var id: String { hash }
+
+    var deviceTitle: String {
+        let title = [deviceModel, platform].filter { !$0.isEmpty }.joined(separator: " · ")
+        return title.isEmpty ? "未知裝置" : title
+    }
+
+    var appTitle: String {
+        guard !appName.isEmpty else { return appVersion }
+        return appVersion.isEmpty ? appName : "\(appName) \(appVersion)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case hash
+        case current
+        case deviceModel = "device_model"
+        case platform
+        case systemVersion = "system_version"
+        case appName = "app_name"
+        case appVersion = "app_version"
+        case dateActive = "date_active"
+        case ip
+        case country
+        case officialApp = "official_app"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hash = (try? container.decode(String.self, forKey: .hash)) ?? ""
+        current = (try? container.decode(Bool.self, forKey: .current)) ?? false
+        deviceModel = (try? container.decode(String.self, forKey: .deviceModel)) ?? ""
+        platform = (try? container.decode(String.self, forKey: .platform)) ?? ""
+        systemVersion = (try? container.decode(String.self, forKey: .systemVersion)) ?? ""
+        appName = (try? container.decode(String.self, forKey: .appName)) ?? ""
+        appVersion = (try? container.decode(String.self, forKey: .appVersion)) ?? ""
+        dateActive = try? container.decode(String.self, forKey: .dateActive)
+        ip = (try? container.decode(String.self, forKey: .ip)) ?? ""
+        country = (try? container.decode(String.self, forKey: .country)) ?? ""
+        officialApp = (try? container.decode(Bool.self, forKey: .officialApp)) ?? false
+    }
+}
+
+struct PrivacyAudit: Codable {
+    let accountID: String?
+    let premium: Bool
+    let premiumStatus: String
+    let generatedAt: String
+    let checks: [PrivacyCheck]
+    let username: String
+    let twoFactorEnabled: Bool
+    let twoFactorRecoveryConfigured: Bool
+    let twoFactorHint: String
+    let sessions: [PrivacySession]
+    let unknownSessionCount: Int
+    let backupAvailable: Bool
+
+    var healthyCheckCount: Int { checks.filter(\.isHealthy).count }
+    var warningCheckCount: Int { checks.filter { !$0.isHealthy }.count }
+
+    enum CodingKeys: String, CodingKey {
+        case accountID = "account_id"
+        case premium
+        case premiumStatus = "premium_status"
+        case generatedAt = "generated_at"
+        case checks
+        case username
+        case twoFactorEnabled = "two_factor_enabled"
+        case twoFactorRecoveryConfigured = "two_factor_recovery_configured"
+        case twoFactorHint = "two_factor_hint"
+        case sessions
+        case unknownSessionCount = "unknown_session_count"
+        case backupAvailable = "backup_available"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accountID = try? container.decode(String.self, forKey: .accountID)
+        premium = (try? container.decode(Bool.self, forKey: .premium)) ?? false
+        premiumStatus = (try? container.decode(String.self, forKey: .premiumStatus)) ?? "unknown"
+        generatedAt = (try? container.decode(String.self, forKey: .generatedAt)) ?? ""
+        checks = (try? container.decode([PrivacyCheck].self, forKey: .checks)) ?? []
+        username = (try? container.decode(String.self, forKey: .username)) ?? ""
+        twoFactorEnabled = (try? container.decode(Bool.self, forKey: .twoFactorEnabled)) ?? false
+        twoFactorRecoveryConfigured = (try? container.decode(Bool.self, forKey: .twoFactorRecoveryConfigured)) ?? false
+        twoFactorHint = (try? container.decode(String.self, forKey: .twoFactorHint)) ?? ""
+        sessions = (try? container.decode([PrivacySession].self, forKey: .sessions)) ?? []
+        unknownSessionCount = (try? container.decode(Int.self, forKey: .unknownSessionCount)) ?? 0
+        backupAvailable = (try? container.decode(Bool.self, forKey: .backupAvailable)) ?? false
+    }
+}
+
 struct ProtectionActionResult: Codable {
     let accountID: String?
     let running: Bool

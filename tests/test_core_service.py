@@ -308,6 +308,38 @@ class FakeParityCore(FakeCore):
         return list(self.auto_start_ids)
 
 
+class FakePrivacyCore(FakeCore):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    async def get_privacy_audit(self, account_id=None):
+        self.calls.append(("get_privacy_audit", account_id))
+        return {"account_id": account_id, "premium": False}
+
+    async def apply_privacy_profile(self, include_premium=False, account_id=None):
+        self.calls.append(("apply_privacy_profile", include_premium, account_id))
+        return {"account_id": account_id, "premium": include_premium}
+
+    async def restore_privacy_settings(self, account_id=None):
+        self.calls.append(("restore_privacy_settings", account_id))
+        return {"account_id": account_id, "restored": True}
+
+    async def revoke_authorization(self, session_hash, account_id=None):
+        self.calls.append(("revoke_authorization", session_hash, account_id))
+        return {"account_id": account_id, "revoked": session_hash}
+
+    async def update_two_factor(
+        self,
+        current_password="",
+        new_password="",
+        hint="",
+        account_id=None,
+    ):
+        self.calls.append(("update_two_factor", current_password, new_password, hint, account_id))
+        return {"account_id": account_id, "two_factor": bool(new_password)}
+
+
 def _wait_for_event(events, name, timeout=2):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -383,6 +415,50 @@ def test_account_details_exposes_global_auto_start_and_omits_credentials():
         "-1001234567890",
         "account-a",
     ) in core.calls
+
+
+def test_privacy_rpc_is_account_scoped_and_preserves_premium_choice():
+    core = FakePrivacyCore()
+    service = CoreService(core=core, platform=FakePlatform())
+
+    assert service.dispatch("get_privacy_audit", {"account_id": "account-a"}) == {
+        "account_id": "account-a",
+        "premium": False,
+    }
+    assert service.dispatch(
+        "apply_privacy_profile",
+        {"account_id": "account-a", "include_premium": "false"},
+    ) == {"account_id": "account-a", "premium": False}
+    assert service.dispatch(
+        "apply_privacy_profile",
+        {"account_id": "account-a", "include_premium": True},
+    ) == {"account_id": "account-a", "premium": True}
+    assert service.dispatch("restore_privacy_settings", {"account_id": "account-a"}) == {
+        "account_id": "account-a",
+        "restored": True,
+    }
+    assert service.dispatch(
+        "revoke_authorization",
+        {"account_id": "account-a", "session_hash": 9876},
+    ) == {"account_id": "account-a", "revoked": "9876"}
+    assert service.dispatch(
+        "update_two_factor",
+        {
+            "account_id": "account-a",
+            "current_password": "old password",
+            "new_password": "new password",
+            "hint": "hint",
+        },
+    ) == {"account_id": "account-a", "two_factor": True}
+
+    assert core.calls == [
+        ("get_privacy_audit", "account-a"),
+        ("apply_privacy_profile", False, "account-a"),
+        ("apply_privacy_profile", True, "account-a"),
+        ("restore_privacy_settings", "account-a"),
+        ("revoke_authorization", "9876", "account-a"),
+        ("update_two_factor", "old password", "new password", "hint", "account-a"),
+    ]
 
 
 def test_moderation_policy_rpc_is_explicitly_account_scoped():

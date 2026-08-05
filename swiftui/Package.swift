@@ -10,6 +10,10 @@ let package = Package(
         .executable(
             name: "TeleShieldApp",
             targets: ["TeleShieldApp"]
+        ),
+        .executable(
+            name: "TeleShieldUpdater",
+            targets: ["TeleShieldUpdater"]
         )
     ],
     targets: [
@@ -20,6 +24,10 @@ let package = Package(
         .executableTarget(
             name: "VisionOCR",
             path: "Sources/VisionOCR"
+        ),
+        .executableTarget(
+            name: "TeleShieldUpdater",
+            path: "Sources/TeleShieldUpdater"
         ),
         .testTarget(
             name: "TeleShieldAppTests",

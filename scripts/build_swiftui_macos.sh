@@ -32,18 +32,23 @@ test -x "$SWIFT_BIN_DIR/VisionOCR"
 cp "$SWIFT_BIN_DIR/VisionOCR" "$SIDECAR_DIR/VisionOCR"
 chmod 755 "$SIDECAR_DIR/VisionOCR"
 
+test -x "$SWIFT_BIN_DIR/TeleShieldUpdater"
+
 mkdir -p \
   "$APP_DIR/Contents/MacOS" \
   "$APP_DIR/Contents/Helpers" \
   "$APP_DIR/Contents/Resources"
 cp "$SWIFT_BIN_DIR/TeleShieldApp" "$APP_DIR/Contents/MacOS/TeleShieldApp"
+cp "$SWIFT_BIN_DIR/TeleShieldUpdater" "$APP_DIR/Contents/Helpers/TeleShieldUpdater"
 cp -R "$SIDECAR_DIR" "$APP_DIR/Contents/Helpers/TeleShieldCore"
 cp "swiftui/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$ICON_FILE" "$APP_DIR/Contents/Resources/TeleShield.icns"
 chmod 755 "$APP_DIR/Contents/MacOS/TeleShieldApp"
+chmod 755 "$APP_DIR/Contents/Helpers/TeleShieldUpdater"
 chmod 755 "$APP_DIR/Contents/Helpers/TeleShieldCore/TeleShieldCore"
 
 test -x "$APP_DIR/Contents/MacOS/TeleShieldApp"
+test -x "$APP_DIR/Contents/Helpers/TeleShieldUpdater"
 test -x "$APP_DIR/Contents/Helpers/TeleShieldCore/TeleShieldCore"
 test -x "$APP_DIR/Contents/Helpers/TeleShieldCore/VisionOCR"
 

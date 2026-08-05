@@ -186,6 +186,16 @@ OCR 讀到的文字也會經過同樣的繁簡、拼音、注音、骨架和導�
 
 API 憑證、驗證碼、2FA 密碼和 Session 都是敏感資料，不要分享或上傳。
 
+### 更新與 GitHub Release
+
+TeleShield 會從公開 GitHub Release 檢查穩定版更新，不會監控 GitHub Actions artifact 或每一次 `main` commit。當有適合目前 Mac 架構、且包含有效 `manifest.json` 的新版 Release 時，App 會在全域設定與 Menu Bar 顯示更新提示。
+
+更新前會先下載 ZIP、驗證 SHA-256、檢查 Bundle ID 與版本，再解壓縮新版 App。驗證成功後才會移除新版 App 的 quarantine，交給更新 helper 替換並重新啟動；更新失敗不會替換目前安裝的版本。
+
+此 fork 目前仍發布未簽署的測試版，因此第一次安裝可能需要依照下方說明移除 quarantine。OTA 不需要 Apple Developer 付費帳號，但未簽署 App 不具備 Developer ID 與 Apple notarization 的完整 Gatekeeper 信任。
+
+正式發布流程是：先透過 Pull Request 測試並合併到 `main`，再在 GitHub Releases 網頁建立例如 `v1.3.0` 的 tag、選擇 `main` 為 Target，按 **Generate release notes** 後發布。GitHub Actions 會以該 Release tag 建置 Intel 與 Apple Silicon 版本，並上傳 DMG、OTA ZIP 與 `manifest.json`。
+
 ### macOS 阻擋 App 開啟時
 
 目前 DMG 是未簽署的測試版。如果 macOS 顯示無法確認開發者，請先把 App 放到 `/Applications`，再在終端機執行：

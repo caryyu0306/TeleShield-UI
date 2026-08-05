@@ -1,69 +1,238 @@
 name: Publish macOS Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      source_run_id:
-        description: "Successful Actions run ID containing the macOS DMG artifacts"
-        required: true
-        default: "30713528029"
-        type: string
-      tag:
-        description: "Release tag to create"
-        required: true
-        default: "v1.0"
-        type: string
-      target_ref:
-        description: "Branch or commit to tag when the release tag does not exist"
-        required: true
-        default: "main"
-        type: string
+  release:
+    types:
+      - published
 
 permissions:
-  actions: read
-  contents: write
+  contents: read
 
 jobs:
-  publish:
-    name: Publish GitHub release
+  tests:
+    name: Release source checks
     runs-on: ubuntu-latest
     steps:
-      - name: Download Apple Silicon DMG
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p release-assets/arm
-          gh run download "${{ inputs.source_run_id }}" \
-            --repo "${{ github.repository }}" \
-            --name macOS-arm-swiftui \
-            --dir release-assets/arm
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-sidecar.txt
+      - name: Install sidecar dependencies
+        run: python -m pip install -r requirements-sidecar.txt pytest
+      - name: Compile Python sources
+        run: python -m compileall -q teleshield.py desktop_platform.py core_service.py
+      - name: Run core and sidecar tests
+        run: python -m pytest -q
 
-      - name: Download Intel DMG
+  macos-swiftui:
+    name: Build release ${{ matrix.artifact_name }} (${{ matrix.expected_arch }})
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            expected_arch: x86_64
+            artifact_name: macOS-intel-release
+            file_name: TeleShield-x86_64.dmg
+            zip_file_name: TeleShield-x86_64.zip
+          - runner: macos-14
+            expected_arch: arm64
+            artifact_name: macOS-arm-release
+            file_name: TeleShield-arm64.dmg
+            zip_file_name: TeleShield-arm64.zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out tagged release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Run SwiftUI state tests
+        run: swift test --package-path swiftui
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-sidecar.txt
+      - name: Assert runner architecture
         env:
-          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
         run: |
-          mkdir -p release-assets/intel
-          gh run download "${{ inputs.source_run_id }}" \
-            --repo "${{ github.repository }}" \
-            --name macOS-intel-swiftui \
-            --dir release-assets/intel
+          actual_arch="$(uname -m)"
+          echo "Runner architecture: $actual_arch"
+          test "$actual_arch" = "$EXPECTED_ARCH"
+      - name: Install sidecar dependencies
+        run: scripts/install_sidecar_dependencies.sh
+      - name: Build SwiftUI application bundle
+        run: scripts/build_swiftui_macos.sh
+      - name: Verify helper architecture and self-test
+        env:
+          TELESHIELD_DATA_DIR: ${{ runner.temp }}/teleshield-data
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          APP="dist/TeleShieldSwiftUI.app"
+          CORE="$APP/Contents/Helpers/TeleShieldCore/TeleShieldCore"
+          OCR="$APP/Contents/Helpers/TeleShieldCore/VisionOCR"
+          UPDATER="$APP/Contents/Helpers/TeleShieldUpdater"
+          app_arch="$(lipo -archs "$APP/Contents/MacOS/TeleShieldApp")"
+          helper_arch="$(lipo -archs "$CORE")"
+          ocr_arch="$(lipo -archs "$OCR")"
+          updater_arch="$(lipo -archs "$UPDATER")"
+          echo "SwiftUI app architecture: $app_arch"
+          echo "Sidecar architecture: $helper_arch"
+          echo "Vision OCR architecture: $ocr_arch"
+          echo "Update helper architecture: $updater_arch"
+          test "$app_arch" = "$EXPECTED_ARCH"
+          test "$helper_arch" = "$EXPECTED_ARCH"
+          test "$ocr_arch" = "$EXPECTED_ARCH"
+          test "$updater_arch" = "$EXPECTED_ARCH"
+          "$CORE" --self-test
+          "$OCR" --self-test > "${RUNNER_TEMP}/vision-ocr-self-test.json"
+          OCR_FIXTURE="${RUNNER_TEMP}/teleshield-ocr-fixture.png"
+          swift scripts/generate_vision_ocr_fixture.swift "$OCR_FIXTURE"
+          OCR_IMAGE="$OCR_FIXTURE" TELESHIELD_VISION_OCR_PATH="$OCR" python - <<'PY'
+          import os
+          import teleshield
 
+          text = teleshield.ocr_image(os.environ["OCR_IMAGE"])
+          assert teleshield.is_spam(text), repr(text)
+          PY
+          printf '%s\n' \
+            '{"id":1,"method":"get_status"}' \
+            '{"id":2,"method":"get_ocr_status"}' \
+            '{"id":3,"method":"shutdown"}' \
+            | "$CORE" --stdio > "${RUNNER_TEMP}/teleshield-sidecar.jsonl"
+          python - "${RUNNER_TEMP}/teleshield-sidecar.jsonl" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          rows = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+          assert [row["id"] for row in rows] == [1, 2, 3]
+          assert all(row["ok"] for row in rows)
+          assert isinstance(rows[0]["result"]["accounts"], list)
+          assert "available" in rows[1]["result"]
+          PY
+      - name: Validate app metadata and report size
+        run: |
+          tag_version="${{ github.event.release.tag_name }}"
+          tag_version="${tag_version#v}"
+          app_version="$(plutil -extract CFBundleShortVersionString raw -o - dist/TeleShieldSwiftUI.app/Contents/Info.plist)"
+          test "$app_version" = "$tag_version"
+          plutil -lint dist/TeleShieldSwiftUI.app/Contents/Info.plist
+          test "$(plutil -extract CFBundleIconFiles.0 raw -o - dist/TeleShieldSwiftUI.app/Contents/Info.plist)" = "TeleShield.icns"
+          test -s dist/TeleShieldSwiftUI.app/Contents/Resources/TeleShield.icns
+          iconset_dir="$(mktemp -d)/TeleShield.iconset"
+          iconutil -c iconset -o "$iconset_dir" dist/TeleShieldSwiftUI.app/Contents/Resources/TeleShield.icns
+          test -s "$iconset_dir/icon_512x512@2x.png"
+          du -sh dist/TeleShieldSwiftUI.app
+          du -sh dist/TeleShieldSwiftUI.app/Contents/Helpers/TeleShieldCore
+      - name: Create unsigned SwiftUI DMG
+        run: |
+          mkdir -p dist/dmg-root
+          cp -R dist/TeleShieldSwiftUI.app dist/dmg-root/TeleShield.app
+          ln -s /Applications dist/dmg-root/Applications
+          hdiutil create \
+            -volname "TeleShield ${{ github.event.release.tag_name }} ${{ matrix.expected_arch }}" \
+            -srcfolder dist/dmg-root \
+            -ov \
+            -format UDZO \
+            "dist/${{ matrix.file_name }}"
+          stat -f 'DMG bytes: %z' "dist/${{ matrix.file_name }}"
+      - name: Create OTA ZIP
+        run: |
+          mkdir -p dist/zip-root
+          cp -R dist/TeleShieldSwiftUI.app dist/zip-root/TeleShield.app
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/zip-root/TeleShield.app \
+            "dist/${{ matrix.zip_file_name }}"
+          stat -f 'ZIP bytes: %z' "dist/${{ matrix.zip_file_name }}"
+      - name: Upload release build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/${{ matrix.file_name }}
+            dist/${{ matrix.zip_file_name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  upload-release-assets:
+    name: Upload release assets and manifest
+    needs: macos-swiftui
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download release build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macOS-*-release
+          path: release-assets
+          merge-multiple: true
       - name: Validate release assets
         run: |
-          test -s release-assets/arm/macOS-arm-swiftui.dmg
-          test -s release-assets/intel/macOS-intel-swiftui.dmg
-          sha256sum \
-            release-assets/arm/macOS-arm-swiftui.dmg \
-            release-assets/intel/macOS-intel-swiftui.dmg
+          test -s release-assets/TeleShield-arm64.dmg
+          test -s release-assets/TeleShield-arm64.zip
+          test -s release-assets/TeleShield-x86_64.dmg
+          test -s release-assets/TeleShield-x86_64.zip
+      - name: Create update manifest
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          case "$TAG_NAME" in
+            v*) VERSION="${TAG_NAME#v}" ;;
+            *) echo "Release tag must start with v: $TAG_NAME" >&2; exit 1 ;;
+          esac
+          ARM_SHA256="$(sha256sum release-assets/TeleShield-arm64.zip | awk '{print $1}')"
+          INTEL_SHA256="$(sha256sum release-assets/TeleShield-x86_64.zip | awk '{print $1}')"
+          python - "$VERSION" "$TAG_NAME" "$ARM_SHA256" "$INTEL_SHA256" > release-assets/manifest.json <<'PY'
+          import json
+          import sys
 
-      - name: Create GitHub release
+          version, tag, arm_sha256, intel_sha256 = sys.argv[1:]
+          json.dump(
+              {
+                  "version": version,
+                  "tag": tag,
+                  "assets": [
+                      {
+                          "architecture": "arm64",
+                          "file_name": "TeleShield-arm64.zip",
+                          "sha256": arm_sha256,
+                      },
+                      {
+                          "architecture": "x86_64",
+                          "file_name": "TeleShield-x86_64.zip",
+                          "sha256": intel_sha256,
+                      },
+                  ],
+              },
+              sys.stdout,
+              indent=2,
+              sort_keys=True,
+          )
+          sys.stdout.write("\n")
+          PY
+          cat release-assets/manifest.json
+      - name: Upload assets to the published GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          gh release create "${{ inputs.tag }}" \
-            release-assets/arm/macOS-arm-swiftui.dmg \
-            release-assets/intel/macOS-intel-swiftui.dmg \
-            --repo "${{ github.repository }}" \
-            --target "${{ inputs.target_ref }}" \
-            --title "TeleShield ${{ inputs.tag }}" \
-            --generate-notes
+          gh release upload "$TAG_NAME" \
+            release-assets/TeleShield-arm64.dmg \
+            release-assets/TeleShield-arm64.zip \
+            release-assets/TeleShield-x86_64.dmg \
+            release-assets/TeleShield-x86_64.zip \
+            release-assets/manifest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

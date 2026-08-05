@@ -289,6 +289,219 @@ struct AccountDetails: Codable {
     }
 }
 
+struct PrivacyPrincipal: Codable, Identifiable, Hashable {
+    let value: String
+    let label: String
+
+    var id: String { value }
+
+    enum CodingKeys: String, CodingKey {
+        case value
+        case label
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        value = (try? container.decode(String.self, forKey: .value)) ?? ""
+        label = (try? container.decode(String.self, forKey: .label)) ?? value
+    }
+
+    init(value: String, label: String? = nil) {
+        self.value = value
+        self.label = label ?? value
+    }
+}
+
+struct PrivacyRuleSetting: Codable, Identifiable {
+    let id: String
+    let title: String
+    let description: String
+    var mode: String
+    let recommendedMode: String
+    var botMode: String
+    var allowUsers: [PrivacyPrincipal]
+    var disallowUsers: [PrivacyPrincipal]
+    var allowChats: [String]
+    var disallowChats: [String]
+
+    var modeTitle: String {
+        switch mode {
+        case "allow_all": return "所有人"
+        case "allow_contacts": return "我的聯絡人"
+        case "allow_close_friends": return "摯友"
+        case "allow_premium": return "Premium 使用者"
+        case "disallow_all": return "沒有人"
+        case "disallow_contacts": return "除了聯絡人"
+        case "allow_bots_only": return "僅限機器人"
+        case "disallow_bots": return "排除機器人"
+        default: return "自訂規則"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case description
+        case mode
+        case recommendedMode = "recommended_mode"
+        case botMode = "bot_mode"
+        case allowUsers = "allow_users"
+        case disallowUsers = "disallow_users"
+        case allowChats = "allow_chats"
+        case disallowChats = "disallow_chats"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? container.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        title = (try? container.decode(String.self, forKey: .title)) ?? "隱私設定"
+        description = (try? container.decode(String.self, forKey: .description)) ?? ""
+        mode = (try? container.decode(String.self, forKey: .mode)) ?? "allow_contacts"
+        recommendedMode = (try? container.decode(String.self, forKey: .recommendedMode)) ?? "allow_contacts"
+        botMode = (try? container.decode(String.self, forKey: .botMode)) ?? "default"
+        allowUsers = (try? container.decode([PrivacyPrincipal].self, forKey: .allowUsers)) ?? []
+        disallowUsers = (try? container.decode([PrivacyPrincipal].self, forKey: .disallowUsers)) ?? []
+        allowChats = (try? container.decode([String].self, forKey: .allowChats)) ?? []
+        disallowChats = (try? container.decode([String].self, forKey: .disallowChats)) ?? []
+    }
+
+    init(
+        id: String,
+        title: String,
+        description: String,
+        mode: String,
+        recommendedMode: String,
+        botMode: String = "default",
+        allowUsers: [PrivacyPrincipal] = [],
+        disallowUsers: [PrivacyPrincipal] = [],
+        allowChats: [String] = [],
+        disallowChats: [String] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.description = description
+        self.mode = mode
+        self.recommendedMode = recommendedMode
+        self.botMode = botMode
+        self.allowUsers = allowUsers
+        self.disallowUsers = disallowUsers
+        self.allowChats = allowChats
+        self.disallowChats = disallowChats
+    }
+}
+
+struct PrivacyDisallowedGifts: Codable {
+    var disallowUnlimitedStargifts: Bool
+    var disallowLimitedStargifts: Bool
+    var disallowUniqueStargifts: Bool
+    var disallowPremiumGifts: Bool
+    var disallowStargiftsFromChannels: Bool
+
+    static let defaults = PrivacyDisallowedGifts(
+        disallowUnlimitedStargifts: false,
+        disallowLimitedStargifts: false,
+        disallowUniqueStargifts: false,
+        disallowPremiumGifts: false,
+        disallowStargiftsFromChannels: false
+    )
+
+    enum CodingKeys: String, CodingKey {
+        case disallowUnlimitedStargifts = "disallow_unlimited_stargifts"
+        case disallowLimitedStargifts = "disallow_limited_stargifts"
+        case disallowUniqueStargifts = "disallow_unique_stargifts"
+        case disallowPremiumGifts = "disallow_premium_gifts"
+        case disallowStargiftsFromChannels = "disallow_stargifts_from_channels"
+    }
+
+    init(
+        disallowUnlimitedStargifts: Bool,
+        disallowLimitedStargifts: Bool,
+        disallowUniqueStargifts: Bool,
+        disallowPremiumGifts: Bool,
+        disallowStargiftsFromChannels: Bool
+    ) {
+        self.disallowUnlimitedStargifts = disallowUnlimitedStargifts
+        self.disallowLimitedStargifts = disallowLimitedStargifts
+        self.disallowUniqueStargifts = disallowUniqueStargifts
+        self.disallowPremiumGifts = disallowPremiumGifts
+        self.disallowStargiftsFromChannels = disallowStargiftsFromChannels
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        disallowUnlimitedStargifts = (try? container.decode(Bool.self, forKey: .disallowUnlimitedStargifts)) ?? Self.defaults.disallowUnlimitedStargifts
+        disallowLimitedStargifts = (try? container.decode(Bool.self, forKey: .disallowLimitedStargifts)) ?? Self.defaults.disallowLimitedStargifts
+        disallowUniqueStargifts = (try? container.decode(Bool.self, forKey: .disallowUniqueStargifts)) ?? Self.defaults.disallowUniqueStargifts
+        disallowPremiumGifts = (try? container.decode(Bool.self, forKey: .disallowPremiumGifts)) ?? Self.defaults.disallowPremiumGifts
+        disallowStargiftsFromChannels = (try? container.decode(Bool.self, forKey: .disallowStargiftsFromChannels)) ?? Self.defaults.disallowStargiftsFromChannels
+    }
+}
+
+struct PrivacyGlobalSettings: Codable {
+    var archiveAndMuteNewNoncontactPeers: Bool
+    var keepArchivedUnmuted: Bool
+    var keepArchivedFolders: Bool
+    var hideReadMarks: Bool
+    var newNoncontactPeersRequirePremium: Bool
+    var displayGiftsButton: Bool
+    var noncontactPeersPaidStars: Int
+    var disallowedGifts: PrivacyDisallowedGifts
+
+    static let defaults = PrivacyGlobalSettings(
+        archiveAndMuteNewNoncontactPeers: false,
+        keepArchivedUnmuted: false,
+        keepArchivedFolders: false,
+        hideReadMarks: false,
+        newNoncontactPeersRequirePremium: false,
+        displayGiftsButton: false,
+        noncontactPeersPaidStars: 0,
+        disallowedGifts: .defaults
+    )
+
+    enum CodingKeys: String, CodingKey {
+        case archiveAndMuteNewNoncontactPeers = "archive_and_mute_new_noncontact_peers"
+        case keepArchivedUnmuted = "keep_archived_unmuted"
+        case keepArchivedFolders = "keep_archived_folders"
+        case hideReadMarks = "hide_read_marks"
+        case newNoncontactPeersRequirePremium = "new_noncontact_peers_require_premium"
+        case displayGiftsButton = "display_gifts_button"
+        case noncontactPeersPaidStars = "noncontact_peers_paid_stars"
+        case disallowedGifts = "disallowed_gifts"
+    }
+
+    init(
+        archiveAndMuteNewNoncontactPeers: Bool,
+        keepArchivedUnmuted: Bool,
+        keepArchivedFolders: Bool,
+        hideReadMarks: Bool,
+        newNoncontactPeersRequirePremium: Bool,
+        displayGiftsButton: Bool,
+        noncontactPeersPaidStars: Int,
+        disallowedGifts: PrivacyDisallowedGifts
+    ) {
+        self.archiveAndMuteNewNoncontactPeers = archiveAndMuteNewNoncontactPeers
+        self.keepArchivedUnmuted = keepArchivedUnmuted
+        self.keepArchivedFolders = keepArchivedFolders
+        self.hideReadMarks = hideReadMarks
+        self.newNoncontactPeersRequirePremium = newNoncontactPeersRequirePremium
+        self.displayGiftsButton = displayGiftsButton
+        self.noncontactPeersPaidStars = noncontactPeersPaidStars
+        self.disallowedGifts = disallowedGifts
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        archiveAndMuteNewNoncontactPeers = (try? container.decode(Bool.self, forKey: .archiveAndMuteNewNoncontactPeers)) ?? Self.defaults.archiveAndMuteNewNoncontactPeers
+        keepArchivedUnmuted = (try? container.decode(Bool.self, forKey: .keepArchivedUnmuted)) ?? Self.defaults.keepArchivedUnmuted
+        keepArchivedFolders = (try? container.decode(Bool.self, forKey: .keepArchivedFolders)) ?? Self.defaults.keepArchivedFolders
+        hideReadMarks = (try? container.decode(Bool.self, forKey: .hideReadMarks)) ?? Self.defaults.hideReadMarks
+        newNoncontactPeersRequirePremium = (try? container.decode(Bool.self, forKey: .newNoncontactPeersRequirePremium)) ?? Self.defaults.newNoncontactPeersRequirePremium
+        displayGiftsButton = (try? container.decode(Bool.self, forKey: .displayGiftsButton)) ?? Self.defaults.displayGiftsButton
+        noncontactPeersPaidStars = (try? container.decode(Int.self, forKey: .noncontactPeersPaidStars)) ?? Self.defaults.noncontactPeersPaidStars
+        disallowedGifts = (try? container.decode(PrivacyDisallowedGifts.self, forKey: .disallowedGifts)) ?? Self.defaults.disallowedGifts
+    }
+}
+
 struct PrivacyCheck: Codable, Identifiable {
     let id: String
     let title: String
@@ -301,6 +514,7 @@ struct PrivacyCheck: Codable, Identifiable {
     let premiumRequired: Bool
     let exceptionCount: Int
     let error: String?
+    let setting: PrivacyRuleSetting?
 
     var isHealthy: Bool { status == "ok" }
 
@@ -326,6 +540,7 @@ struct PrivacyCheck: Codable, Identifiable {
         case premiumRequired = "premium_required"
         case exceptionCount = "exception_count"
         case error
+        case setting
     }
 
     init(from decoder: Decoder) throws {
@@ -341,6 +556,7 @@ struct PrivacyCheck: Codable, Identifiable {
         premiumRequired = (try? container.decode(Bool.self, forKey: .premiumRequired)) ?? false
         exceptionCount = (try? container.decode(Int.self, forKey: .exceptionCount)) ?? 0
         error = try? container.decode(String.self, forKey: .error)
+        setting = try? container.decode(PrivacyRuleSetting.self, forKey: .setting)
     }
 }
 
@@ -405,6 +621,7 @@ struct PrivacyAudit: Codable {
     let premiumStatus: String
     let generatedAt: String
     let checks: [PrivacyCheck]
+    let globalSettings: PrivacyGlobalSettings?
     let username: String
     let twoFactorEnabled: Bool
     let twoFactorRecoveryConfigured: Bool
@@ -422,6 +639,7 @@ struct PrivacyAudit: Codable {
         case premiumStatus = "premium_status"
         case generatedAt = "generated_at"
         case checks
+        case globalSettings = "global_settings"
         case username
         case twoFactorEnabled = "two_factor_enabled"
         case twoFactorRecoveryConfigured = "two_factor_recovery_configured"
@@ -438,6 +656,7 @@ struct PrivacyAudit: Codable {
         premiumStatus = (try? container.decode(String.self, forKey: .premiumStatus)) ?? "unknown"
         generatedAt = (try? container.decode(String.self, forKey: .generatedAt)) ?? ""
         checks = (try? container.decode([PrivacyCheck].self, forKey: .checks)) ?? []
+        globalSettings = try? container.decode(PrivacyGlobalSettings.self, forKey: .globalSettings)
         username = (try? container.decode(String.self, forKey: .username)) ?? ""
         twoFactorEnabled = (try? container.decode(Bool.self, forKey: .twoFactorEnabled)) ?? false
         twoFactorRecoveryConfigured = (try? container.decode(Bool.self, forKey: .twoFactorRecoveryConfigured)) ?? false

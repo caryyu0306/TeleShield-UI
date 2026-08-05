@@ -901,6 +901,9 @@ private struct PrivacyAuditView: View {
     @State private var showTwoFactorSheet = false
     @State private var pendingRevokeSession: PrivacySession?
     @State private var actionError = ""
+    @State private var draftPrivacySettings: [PrivacyRuleSetting] = []
+    @State private var draftGlobalSettings = PrivacyGlobalSettings.defaults
+    @State private var draftUsername = ""
 
     var body: some View {
         ScrollView {
@@ -930,6 +933,17 @@ private struct PrivacyAuditView: View {
                         onApplyFree: { showApplyConfirmation = true },
                         onApplyPremium: { showPremiumConfirmation = true },
                         onRestore: { showRestoreConfirmation = true }
+                    )
+
+                    PrivacySettingsEditor(
+                        settings: $draftPrivacySettings,
+                        globalSettings: $draftGlobalSettings,
+                        username: $draftUsername,
+                        checks: audit.checks,
+                        globalSettingsAvailable: audit.globalSettings != nil,
+                        isBusy: client.isBusy,
+                        onSave: { runCustomSettingsSave() },
+                        onReset: { syncDraft(from: audit) }
                     )
 
                     VStack(alignment: .leading, spacing: 12) {
@@ -989,6 +1003,10 @@ private struct PrivacyAuditView: View {
         .task(id: client.selectedAccountID) {
             actionError = ""
             await client.fetchPrivacyAudit()
+            syncDraft(from: client.privacyAudit)
+        }
+        .onChange(of: client.privacyAudit?.generatedAt) { _ in
+            syncDraft(from: client.privacyAudit)
         }
         .confirmationDialog(
             "套用免費版隱私建議？",
@@ -1000,7 +1018,7 @@ private struct PrivacyAuditView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("會將支援的隱私項目調整為「我的聯絡人」，並啟用陌生人新對話自動封存與靜音。套用前會保存目前設定。")
+            Text("會依 Telegram 隱私與安全設定的建議調整各項規則，並保留目前的例外對象；套用前會保存目前設定。")
         }
         .confirmationDialog(
             "套用 Premium 隱私建議？",
@@ -1071,6 +1089,18 @@ private struct PrivacyAuditView: View {
         }
     }
 
+    private func runCustomSettingsSave() {
+        actionError = ""
+        Task {
+            let result = await client.updatePrivacySettings(
+                settings: draftPrivacySettings,
+                globalSettings: draftGlobalSettings,
+                username: draftUsername
+            )
+            handleActionResult(result)
+        }
+    }
+
     private func runRevoke(_ session: PrivacySession) {
         actionError = ""
         Task {
@@ -1086,6 +1116,13 @@ private struct PrivacyAuditView: View {
         } else {
             actionError = result
         }
+    }
+
+    private func syncDraft(from audit: PrivacyAudit?) {
+        guard let audit else { return }
+        draftPrivacySettings = audit.checks.compactMap(\.setting)
+        draftGlobalSettings = audit.globalSettings ?? .defaults
+        draftUsername = audit.username
     }
 }
 
@@ -1118,7 +1155,7 @@ private struct PrivacyAuditActionCard: View {
                 }
             }
 
-            Text("免費版建議會收緊陌生人可見範圍；Premium 建議會再要求陌生人使用 Premium 才能開始聊天。")
+            Text("可直接套用截圖中的建議規則，也可以在下方逐項調整主要規則、例外對象、全域設定與公開 username。")
                 .font(.callout)
                 .foregroundStyle(TeleShieldDesign.muted)
 
@@ -1138,6 +1175,289 @@ private struct PrivacyAuditActionCard: View {
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .teleShieldSurface(radius: 14, fill: audit.premium ? Color.purple.opacity(0.08) : Color.orange.opacity(0.08))
+    }
+}
+
+private struct PrivacySettingsEditor: View {
+    @Binding var settings: [PrivacyRuleSetting]
+    @Binding var globalSettings: PrivacyGlobalSettings
+    @Binding var username: String
+    let checks: [PrivacyCheck]
+    let globalSettingsAvailable: Bool
+    let isBusy: Bool
+    let onSave: () -> Void
+    let onReset: () -> Void
+
+    private var editableIDs: Set<String> {
+        Set(checks.filter { $0.editable }.map(\.id))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("自訂隱私設定", systemImage: "slider.horizontal.3")
+                    .font(.headline)
+                Spacer()
+                Text("每項設定都可單獨調整")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("這裡的變更會透過 MTProto 寫入 Telegram 帳號雲端，所有已登入裝置都會同步。使用者例外可輸入 User ID 或 @username；群組例外請輸入群組 ID。")
+                .font(.callout)
+                .foregroundStyle(TeleShieldDesign.muted)
+
+            HStack(spacing: 12) {
+                Image(systemName: "at")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22)
+                TextField("公開 username（留空移除）", text: $username)
+                    .textFieldStyle(.roundedBorder)
+                Text("可輸入或不輸入 @")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            Text("Telegram 隱私規則")
+                .font(.subheadline.weight(.semibold))
+            if settings.isEmpty {
+                Text("目前的 Telethon 版本沒有回傳可編輯的隱私規則。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach($settings) { $setting in
+                    PrivacyRuleSettingEditor(
+                        setting: $setting,
+                        isEditable: editableIDs.contains(setting.id)
+                    )
+                }
+            }
+
+            Divider()
+
+            PrivacyGlobalSettingsEditor(
+                settings: $globalSettings,
+                isAvailable: globalSettingsAvailable
+            )
+
+            HStack(spacing: 10) {
+                Button("重設為目前 Telegram 設定", action: onReset)
+                    .disabled(isBusy || !globalSettingsAvailable)
+                Spacer()
+                Button("儲存並套用自訂設定", action: onSave)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy || settings.isEmpty || !globalSettingsAvailable)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .teleShieldSurface(radius: 14)
+    }
+}
+
+private struct PrivacyRuleSettingEditor: View {
+    @Binding var setting: PrivacyRuleSetting
+    let isEditable: Bool
+
+    private static let standardModeOptions: [(id: String, title: String)] = [
+        ("allow_all", "所有人"),
+        ("allow_contacts", "我的聯絡人"),
+        ("disallow_all", "沒有人"),
+        ("disallow_contacts", "除了聯絡人"),
+        ("allow_bots_only", "僅限機器人"),
+        ("disallow_bots", "排除機器人"),
+    ]
+
+    private static let botOptions: [(id: String, title: String)] = [
+        ("default", "依主要規則"),
+        ("allow", "額外允許機器人"),
+        ("disallow", "額外排除機器人"),
+    ]
+
+    private var modeOptions: [(id: String, title: String)] {
+        var options = Self.standardModeOptions
+        if setting.id == "chat_invite" || setting.mode == "allow_premium" {
+            options.insert(("allow_premium", "Premium 使用者"), at: 2)
+        }
+        if setting.mode == "allow_close_friends" {
+            options.insert(("allow_close_friends", "摯友"), at: 2)
+        }
+        return options
+    }
+
+    private var allowUsersText: Binding<String> {
+        Binding(
+            get: { setting.allowUsers.map(\.value).joined(separator: ", ") },
+            set: { setting.allowUsers = parsePrincipals($0, existing: setting.allowUsers) }
+        )
+    }
+
+    private var disallowUsersText: Binding<String> {
+        Binding(
+            get: { setting.disallowUsers.map(\.value).joined(separator: ", ") },
+            set: { setting.disallowUsers = parsePrincipals($0, existing: setting.disallowUsers) }
+        )
+    }
+
+    private var allowChatsText: Binding<String> {
+        Binding(
+            get: { setting.allowChats.joined(separator: ", ") },
+            set: { setting.allowChats = parseTokens($0) }
+        )
+    }
+
+    private var disallowChatsText: Binding<String> {
+        Binding(
+            get: { setting.disallowChats.joined(separator: ", ") },
+            set: { setting.disallowChats = parseTokens($0) }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(setting.title)
+                        .font(.callout.weight(.semibold))
+                    Text(setting.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("主要規則", selection: $setting.mode) {
+                    ForEach(modeOptions, id: \.id) { option in
+                        Text(option.title).tag(option.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 180)
+            }
+
+            HStack(spacing: 12) {
+                Picker("機器人例外", selection: $setting.botMode) {
+                    ForEach(Self.botOptions, id: \.id) { option in
+                        Text(option.title).tag(option.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 220)
+                Text("保留 Telegram 目前的例外順序並套用新的主要規則。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 12) {
+                TextField("允許的使用者：ID 或 @username", text: allowUsersText)
+                    .textFieldStyle(.roundedBorder)
+                TextField("排除的使用者：ID 或 @username", text: disallowUsersText)
+                    .textFieldStyle(.roundedBorder)
+            }
+            HStack(spacing: 12) {
+                TextField("允許的群組 ID", text: allowChatsText)
+                    .textFieldStyle(.roundedBorder)
+                TextField("排除的群組 ID", text: disallowChatsText)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            if !isEditable {
+                Text("此項目目前由 Telegram／Telethon 標示為不可編輯。")
+                    .font(.caption)
+                    .foregroundStyle(TeleShieldDesign.warning)
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: TeleShieldDesign.innerRadius))
+        .disabled(!isEditable)
+    }
+
+    private func parsePrincipals(_ text: String, existing: [PrivacyPrincipal]) -> [PrivacyPrincipal] {
+        let existingByValue = Dictionary(
+            uniqueKeysWithValues: existing.map { ($0.value.lowercased(), $0) }
+        )
+        return parseTokens(text).map { token in
+            existingByValue[token.lowercased()] ?? PrivacyPrincipal(value: token)
+        }
+    }
+
+    private func parseTokens(_ text: String) -> [String] {
+        var seen = Set<String>()
+        return text.split { character in
+            character == "," || character == " " || character == "\n" || character == "\t"
+        }.compactMap { substring in
+            let token = String(substring).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty, seen.insert(token.lowercased()).inserted else { return nil }
+            return token
+        }
+    }
+}
+
+private struct PrivacyGlobalSettingsEditor: View {
+    @Binding var settings: PrivacyGlobalSettings
+    let isAvailable: Bool
+
+    private var paidStarsText: Binding<String> {
+        Binding(
+            get: { String(settings.noncontactPeersPaidStars) },
+            set: {
+                if let value = Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    settings.noncontactPeersPaidStars = min(max(value, 0), 1_000_000)
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("全域與禮物設定", systemImage: "globe")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                if !isAvailable {
+                    Text("無法讀取 Telegram 全域設定")
+                        .font(.caption)
+                        .foregroundStyle(TeleShieldDesign.warning)
+                }
+            }
+
+            Toggle("封存並靜音陌生人新對話", isOn: $settings.archiveAndMuteNewNoncontactPeers)
+            Toggle("保留未靜音的封存對話", isOn: $settings.keepArchivedUnmuted)
+            Toggle("保留封存資料夾", isOn: $settings.keepArchivedFolders)
+            Toggle("隱藏已讀標記", isOn: $settings.hideReadMarks)
+            Toggle("要求陌生人使用 Premium", isOn: $settings.newNoncontactPeersRequirePremium)
+            Text("選取 Premium 限制時，未購買 Premium 的帳號在儲存時會顯示資格提示。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("顯示禮物按鈕", isOn: $settings.displayGiftsButton)
+
+            HStack(spacing: 10) {
+                Text("陌生人付費訊息")
+                TextField("Stars（0 = 不收費）", text: paidStarsText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 170)
+                Stepper("", value: $settings.noncontactPeersPaidStars, in: 0...1_000_000)
+                    .labelsHidden()
+                Text("Stars")
+                    .foregroundStyle(.secondary)
+            }
+            Text("此功能需要 Telegram Premium，且仍受 Telegram 帳號資格與可用性限制。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("拒絕接收的禮物類型")
+                    .font(.callout.weight(.medium))
+                Toggle("無限量星星禮物", isOn: $settings.disallowedGifts.disallowUnlimitedStargifts)
+                Toggle("限量星星禮物", isOn: $settings.disallowedGifts.disallowLimitedStargifts)
+                Toggle("獨特星星禮物", isOn: $settings.disallowedGifts.disallowUniqueStargifts)
+                Toggle("Premium 禮物", isOn: $settings.disallowedGifts.disallowPremiumGifts)
+                Toggle("頻道送出的星星禮物", isOn: $settings.disallowedGifts.disallowStargiftsFromChannels)
+            }
+        }
+        .disabled(!isAvailable)
     }
 }
 

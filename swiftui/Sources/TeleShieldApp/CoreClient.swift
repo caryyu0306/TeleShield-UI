@@ -459,6 +459,76 @@ final class CoreClient: ObservableObject {
         } catch { present(error: error) }
     }
 
+    func updatePrivacySettings(
+        settings: [PrivacyRuleSetting],
+        globalSettings: PrivacyGlobalSettings,
+        username: String,
+        accountID: String? = nil
+    ) async -> String? {
+        guard !isBusy else { return "目前已有操作進行中" }
+        guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {
+            let error = CoreClientError(message: "請先選取已登入的 Telegram 帳號")
+            present(error: error)
+            return error.localizedDescription
+        }
+        isBusy = true
+        busyOperation = "儲存並套用隱私設定"
+        defer { isBusy = false; busyOperation = nil }
+
+        let privacyPayload: [String: JSONValue] = Dictionary(
+            uniqueKeysWithValues: settings.map { setting in
+                (
+                    setting.id,
+                    JSONValue.object([
+                        "mode": .string(setting.mode),
+                        "bot_mode": .string(setting.botMode),
+                        "allow_users": .array(setting.allowUsers.map { .string($0.value) }),
+                        "disallow_users": .array(setting.disallowUsers.map { .string($0.value) }),
+                        "allow_chats": .array(setting.allowChats.map { .string($0) }),
+                        "disallow_chats": .array(setting.disallowChats.map { .string($0) }),
+                    ])
+                )
+            }
+        )
+        let gifts = globalSettings.disallowedGifts
+        let globalPayload: [String: JSONValue] = [
+            "archive_and_mute_new_noncontact_peers": .bool(globalSettings.archiveAndMuteNewNoncontactPeers),
+            "keep_archived_unmuted": .bool(globalSettings.keepArchivedUnmuted),
+            "keep_archived_folders": .bool(globalSettings.keepArchivedFolders),
+            "hide_read_marks": .bool(globalSettings.hideReadMarks),
+            "new_noncontact_peers_require_premium": .bool(globalSettings.newNoncontactPeersRequirePremium),
+            "display_gifts_button": .bool(globalSettings.displayGiftsButton),
+            "noncontact_peers_paid_stars": .int(globalSettings.noncontactPeersPaidStars),
+            "disallowed_gifts": .object([
+                "disallow_unlimited_stargifts": .bool(gifts.disallowUnlimitedStargifts),
+                "disallow_limited_stargifts": .bool(gifts.disallowLimitedStargifts),
+                "disallow_unique_stargifts": .bool(gifts.disallowUniqueStargifts),
+                "disallow_premium_gifts": .bool(gifts.disallowPremiumGifts),
+                "disallow_stargifts_from_channels": .bool(gifts.disallowStargiftsFromChannels),
+            ]),
+        ]
+        do {
+            let data = try await request(
+                method: "update_privacy_settings",
+                params: [
+                    "account_id": .string(targetAccountID),
+                    "username": .string(username),
+                    "settings": .object([
+                        "privacy": .object(privacyPayload),
+                        "global": .object(globalPayload),
+                    ]),
+                ]
+            )
+            let nextAudit = try decodeResult(PrivacyAudit.self, from: data)
+            if selectedAccountID == targetAccountID { privacyAudit = nextAudit }
+            appendLog("自訂隱私設定已儲存並套用到 Telegram 帳號", level: "info")
+            return nil
+        } catch {
+            present(error: error)
+            return error.localizedDescription
+        }
+    }
+
     func applyPrivacyProfile(includePremium: Bool, accountID: String? = nil) async -> String? {
         guard !isBusy else { return "目前已有操作進行中" }
         guard let targetAccountID = accountID ?? selectedAccountID, !targetAccountID.isEmpty else {

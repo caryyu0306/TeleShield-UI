@@ -2668,6 +2668,7 @@ def test_privacy_profile_gates_premium_and_restores_previous_settings(monkeypatc
         def __init__(self):
             self.privacy_writes = 0
             self.privacy_write_types = []
+            self.privacy_write_keys = []
             self.global_writes = 0
             self.global_settings = types.GlobalPrivacySettings(
                 archive_and_mute_new_noncontact_peers=False,
@@ -2696,12 +2697,15 @@ def test_privacy_profile_gates_premium_and_restores_previous_settings(monkeypatc
             if isinstance(request, functions.account.SetPrivacyRequest):
                 self.privacy_writes += 1
                 self.privacy_write_types.append(type(request.rules[0]))
+                self.privacy_write_keys.append(type(request.key).__name__)
                 return None
             if isinstance(request, functions.account.GetGlobalPrivacySettingsRequest):
                 return self.global_settings
             if isinstance(request, functions.account.SetGlobalPrivacySettingsRequest):
                 self.global_writes += 1
                 self.global_settings = request.settings
+                return None
+            if isinstance(request, functions.account.UpdateUsernameRequest):
                 return None
             if isinstance(request, functions.account.GetPasswordRequest):
                 return SimpleNamespace(has_password=False, has_recovery=False, hint="")
@@ -2738,11 +2742,24 @@ def test_privacy_profile_gates_premium_and_restores_previous_settings(monkeypatc
     applied = asyncio.run(teleshield.apply_privacy_profile(False, account_id="account-a"))
     assert applied["backup_available"] is True
     assert client.privacy_writes == len(teleshield.PRIVACY_PROFILE_ITEMS)
-    assert all(
-        write_type is types.InputPrivacyValueAllowContacts
-        for write_type in client.privacy_write_types
-    )
+    assert len(client.privacy_write_types) == len(teleshield.PRIVACY_PROFILE_ITEMS)
+    assert types.InputPrivacyValueDisallowAll in client.privacy_write_types
+    assert types.InputPrivacyValueAllowContacts in client.privacy_write_types
+    assert types.InputPrivacyValueAllowAll in client.privacy_write_types
+    assert "InputPrivacyKeyPhoneNumber" in client.privacy_write_keys
     assert teleshield.load_privacy_backup("account-a") is not None
+
+    with pytest.raises(teleshield.PremiumAccountRequiredError, match="沒有購買 Telegram Premium"):
+        asyncio.run(
+            teleshield.update_privacy_settings(
+                {
+                    "privacy": {},
+                    "global": {"noncontact_peers_paid_stars": 1},
+                },
+                account_id="account-a",
+            )
+        )
+    assert client.global_writes == 1
 
     restored = asyncio.run(teleshield.restore_privacy_settings(account_id="account-a"))
     assert restored["backup_available"] is False

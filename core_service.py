@@ -203,6 +203,7 @@ class CoreService:
             "test_telegram_notification": self._test_telegram_notification,
             "get_privacy_audit": self._get_privacy_audit,
             "apply_privacy_profile": self._apply_privacy_profile,
+            "update_privacy_settings": self._update_privacy_settings,
             "restore_privacy_settings": self._restore_privacy_settings,
             "revoke_authorization": self._revoke_authorization,
             "update_two_factor": self._update_two_factor,
@@ -983,6 +984,23 @@ class CoreService:
                 account_id=account_id,
             )
         )
+
+    def _update_privacy_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._resolve_account_id(params)
+        self._assert_account_idle(account_id)
+        updater = getattr(self.core, "update_privacy_settings", None)
+        if not callable(updater):
+            raise InvalidRequestError("目前核心不支援自訂隱私設定")
+        settings = params.get("settings")
+        if not isinstance(settings, dict):
+            raise InvalidRequestError("settings 必須是 JSON object")
+        kwargs = {
+            "privacy_settings": settings,
+            "account_id": account_id,
+        }
+        if "username" in params:
+            kwargs["username"] = str(params.get("username") or "")
+        return asyncio.run(updater(**kwargs))
 
     def _restore_privacy_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)

@@ -321,6 +321,12 @@ class FakePrivacyCore(FakeCore):
         self.calls.append(("apply_privacy_profile", include_premium, account_id))
         return {"account_id": account_id, "premium": include_premium}
 
+    async def update_privacy_settings(
+        self, privacy_settings, username=None, account_id=None
+    ):
+        self.calls.append(("update_privacy_settings", privacy_settings, username, account_id))
+        return {"account_id": account_id, "updated": True}
+
     async def restore_privacy_settings(self, account_id=None):
         self.calls.append(("restore_privacy_settings", account_id))
         return {"account_id": account_id, "restored": True}
@@ -433,6 +439,14 @@ def test_privacy_rpc_is_account_scoped_and_preserves_premium_choice():
         "apply_privacy_profile",
         {"account_id": "account-a", "include_premium": True},
     ) == {"account_id": "account-a", "premium": True}
+    settings = {
+        "privacy": {"phone_number": {"mode": "disallow_all"}},
+        "global": {"hide_read_marks": True},
+    }
+    assert service.dispatch(
+        "update_privacy_settings",
+        {"account_id": "account-a", "settings": settings, "username": "alice"},
+    ) == {"account_id": "account-a", "updated": True}
     assert service.dispatch("restore_privacy_settings", {"account_id": "account-a"}) == {
         "account_id": "account-a",
         "restored": True,
@@ -455,6 +469,7 @@ def test_privacy_rpc_is_account_scoped_and_preserves_premium_choice():
         ("get_privacy_audit", "account-a"),
         ("apply_privacy_profile", False, "account-a"),
         ("apply_privacy_profile", True, "account-a"),
+        ("update_privacy_settings", settings, "alice", "account-a"),
         ("restore_privacy_settings", "account-a"),
         ("revoke_authorization", "9876", "account-a"),
         ("update_two_factor", "old password", "new password", "hint", "account-a"),
